@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>融合世界标签体系 - 树形浏览器</title>
+<title>demiwtg - 树形浏览器</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 :root { --panel-w: 380px; }
@@ -73,13 +73,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC"
 </head>
 <body>
 <div id="header">
-  <div id="title">融合世界标签体系</div>
+  <div id="title">demiwtg</div>
   <div id="stats"></div>
-  <select id="filter" onchange="applyFilter()" style="padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;">
-    <option value="all">全部</option>
-    <option value="ip" selected>IP 分类标签</option>
-    <option value="general">通用分类标签</option>
-  </select>
   <select id="score-field" onchange="onScoreFilter()" title="打分筛选：选择分数维度（匹配 kb_match / 丰富 richness）" style="padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;">
     <option value="all">打分：全部</option>
     <option value="km">打分：匹配</option>
@@ -108,12 +103,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC"
 <!-- 无服务模式：双击(file://)打开时，由 build/taxonomy.js / build/instances.js / build/imgs.js
      把数据注入为全局变量（file:// 协议下浏览器禁止 fetch 本地文件）。若 sidecar 不存在，则回退到
      fetch（需经 http 服务打开）。运行 `python3 viewer/build_viewer.py` 生成这些 sidecar，
-     其中 imgs.js 为实例 → 原图相对路径索引（../data/dataset/blobs/...，由 dataset/meta/images.jsonl 现场聚合）。
-     注意：原图位于 data/dataset/，file:// 双击打开时浏览器禁止读取，图片需经 HTTP 服务查看：
+     其中 imgs.js 为实例 → 原图相对路径索引（../datasets/demiwtg/blobs/...，由 demiwtg/meta/images.jsonl 现场聚合）。
+     注意：原图位于 datasets/demiwtg/，file:// 双击打开时浏览器禁止读取，图片需经 HTTP 服务查看：
        python3 -m http.server 8000（在仓库根运行） → http://localhost:8000/viewer/tag_tree_explorer.html -->
-<script src="build/taxonomy.js"></script>
-<script src="build/instances.js"></script>
-<script src="build/imgs.js"></script>
+<script src="build/taxonomy.js?v=3"></script>
+<script src="build/instances.js?v=3"></script>
+<script src="build/imgs.js?v=3"></script>
 <script>
 let treeData = null;
 window.ROLE_INTROS = {};
@@ -196,8 +191,8 @@ async function loadTaxonomy() {
             metaDoc = window.__INSTANCES__;
         } else {
             const [taxResp, metaResp] = await Promise.all([
-                fetch("../data/taxonomy/taxonomy.json", { cache: "no-store" }),
-                fetch("../data/taxonomy/instances.json", { cache: "no-store" })
+                fetch("../datasets/demiwtg/meta/taxonomy.json", { cache: "no-store" }),
+                fetch("../datasets/demiwtg/meta/instances.json", { cache: "no-store" })
             ]);
             if (!taxResp.ok) throw new Error("taxonomy.json HTTP " + taxResp.status);
             if (!metaResp.ok) throw new Error("instances.json HTTP " + metaResp.status);
@@ -234,17 +229,16 @@ function countNodes(n) {
     return c;
 }
 
-// 子树图片统计：_instImg = 本节点直挂实例中有图的去重个数；_imgN = 对应图片张数；
-// _subInstImg/_subImgN = 含全部子孙节点的子树聚合。数据源为 imgs.js 注入的 __IMGS__
-//（standalone/file:// 无图模式下为 null，统计自然全 0，徽标不渲染）。
-// 计数经顶部打分过滤器筛一道，阈值变化时由 refreshImgBadges 重算。
+// 子树统计：_names = 子树实例名去重集合；_subInst = 名单总数（子树去重）；
+// _instImg = 本节点直挂实例中有图的去重个数；_imgN = 对应图片张数；
+// _subInstImg/_subImgN = 含全部子孙节点的子树聚合。图片数据源为 imgs.js 注入的 __IMGS__
+//（standalone/file:// 无图模式下为 null，图片部分统计全 0，徽标只显示名单总数）。
+// 图片计数经顶部打分过滤器筛一道，阈值变化时由 refreshImgBadges 重算。
 function computeImgStats(node) {
+    const names = new Set(node.instances || []);
     let instImg = 0, imgN = 0;
-    if (node.instances && window.__IMGS__) {
-        const seen = new Set();
-        for (const nm of node.instances) {
-            if (seen.has(nm)) continue;
-            seen.add(nm);
+    if (window.__IMGS__) {
+        for (const nm of names) {
             const arr = window.__IMGS__[nm];
             if (arr && arr.length) {
                 const f = applyScoreFilter(arr);
@@ -258,13 +252,16 @@ function computeImgStats(node) {
             computeImgStats(ch);
             subInstImg += ch._subInstImg;
             subImgN += ch._subImgN;
+            for (const nm of ch._names) names.add(nm);
         }
     }
+    node._names = names;
+    node._subInst = names.size;
     node._instImg = instImg; node._imgN = imgN;
     node._subInstImg = subInstImg; node._subImgN = subImgN;
 }
 
-// 图片徽标统一创建入口：节点显示子树聚合（有图实例数 / 图片张数），
+// 徽标统一创建入口：节点显示「名单总数 · 有图实例数 / 图片张数」（子树聚合），
 // 实例行显示自身筛选后图片数；createNode 与 refreshImgBadges 共用。
 function imgBadgeEl(node) {
     const fEl = document.getElementById("score-field");
@@ -279,12 +276,17 @@ function imgBadgeEl(node) {
         if (n !== raw.length) badge.title = "\u7B5B\u9009 " + n + " / \u5171 " + raw.length + " \u5F20";
         return badge;
     }
+    const subInst = node._subInst || 0;
     const subInstImg = node._subInstImg || 0, subImgN = node._subImgN || 0;
-    if (!subInstImg) return null;
+    if (!subInst && !subInstImg) return null;
     const badge = document.createElement("span");
     badge.className = "node-count imgs";
-    badge.textContent = "\uD83D\uDDBC " + subInstImg + " \u5B9E\u4F8B / " + subImgN + " \u56FE";
-    badge.title = (fOn ? "\u6253\u5206\u7B5B\u9009\u540E\uFF1A" : "") + "\u5B50\u6811\u5171 " + subInstImg + " \u4E2A\u6709\u56FE\u5B9E\u4F8B\uFF0C\u5408\u8BA1 " + subImgN + " \u5F20\u56FE\u7247";
+    badge.textContent = "\uD83C\uDFF7 " + subInst.toLocaleString() + " \u5B9E\u4F8B" +
+        (subInstImg ? " \u00B7 \uD83D\uDDBC " + subInstImg.toLocaleString() +
+         " \u5B9E\u4F8B / " + subImgN.toLocaleString() + " \u56FE" : "");
+    badge.title = "\u5B50\u6811\u540D\u5355\u53BB\u91CD\u5171 " + subInst + " \u4E2A\u5B9E\u4F8B\uFF1B" +
+        (fOn ? "\u6253\u5206\u7B5B\u9009\u540E\uFF1A" : "") +
+        "\u5176\u4E2D " + subInstImg + " \u4E2A\u6709\u56FE\uFF0C\u5408\u8BA1 " + subImgN + " \u5F20\u56FE\u7247";
     return badge;
 }
 
@@ -308,16 +310,7 @@ let currentRoot = null;
 const container = document.getElementById("tree-container");
 
 function getFilteredRoot() {
-    const filter = document.getElementById("filter").value;
-    if (filter === "all") return treeData;
-    if (filter === "ip") {
-        const ip = treeData.children.find(c => c.name.includes("IP"));
-        return ip || treeData;
-    }
-    if (filter === "general") {
-        const g = treeData.children.find(c => c.name.includes("通用"));
-        return g || treeData;
-    }
+    // 前缀精简后根 demiwtg 直挂 29 域，无子树过滤（旧 IP/通用双树过滤器已废）
     return treeData;
 }
 
@@ -352,10 +345,11 @@ function createNode(node, depth) {
     name.textContent = node.name;
     row.appendChild(name);
 
-    if (!isInstance && (hasChildren || hasInstances)) {
+    // 子节点数徽标（实例名单总数由下方统计徽标承载，不再重复显示）
+    if (!isInstance && hasChildren) {
         const cnt = document.createElement("span");
-        cnt.className = "node-count" + (hasInstances && !hasChildren ? " inst" : "");
-        cnt.textContent = hasChildren ? node.children.length : (node.instances.length + " \u5B9E\u4F8B");
+        cnt.className = "node-count";
+        cnt.textContent = node.children.length;
         row.appendChild(cnt);
     }
 
@@ -542,13 +536,6 @@ function renderTree() {
     const rootToggle = container.querySelector("#tree-container > div > .node-row > .toggle");
     if (rootToggle) rootToggle.click();
     document.getElementById("stats").textContent = countNodes(currentRoot) + " 节点";
-}
-
-function applyFilter() {
-    if (!treeData) return;
-    document.getElementById("search").value = "";
-    document.getElementById("result-count").textContent = "";
-    renderTree();
 }
 
 function expandAll() {

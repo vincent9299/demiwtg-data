@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>demiwtg (EN) - Tree Explorer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root { --panel-w: 380px; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f5f5; color: #333; }
+#header { background: #fff; padding: 10px 20px; border-bottom: 1px solid #e0e0e0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; position: sticky; top: 0; z-index: 100; }
+#title { font-size: 16px; font-weight: 700; color: #1a1a1a; white-space: nowrap; }
+#stats { font-size: 12px; color: #888; }
+#search { flex: 1; min-width: 150px; padding: 6px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; outline: none; }
+#search:focus { border-color: #4e79a7; }
+.btn { padding: 5px 12px; border: 1px solid #ddd; border-radius: 6px; background: #fff; cursor: pointer; font-size: 12px; color: #555; white-space: nowrap; }
+.btn:hover { background: #f0f0f0; }
+#breadcrumb { padding: 5px 20px; background: #fafafa; border-bottom: 1px solid #eee; font-size: 12px; color: #999; cursor: pointer; }
+#breadcrumb:hover { color: #4e79a7; }
+#tree-container { padding: 8px 20px; overflow-x: auto; margin-right: calc(var(--panel-w) + 20px); }
+#breadcrumb { margin-right: calc(var(--panel-w) + 20px); }
+#splitter { position: fixed; top: 0; bottom: 0; right: calc(var(--panel-w) - 3px); width: 6px; cursor: col-resize; z-index: 95; }
+#splitter:hover, #splitter.drag { background: rgba(78,121,167,0.35); }
+#detail-panel { position: fixed; top: 0; right: 0; width: var(--panel-w); height: 100vh; background: #fff; border-left: 1px solid #e0e0e0; box-shadow: -2px 0 10px rgba(0,0,0,0.06); padding: 64px 18px 18px; overflow-y: auto; font-size: 13px; color: #333; z-index: 80; }
+#detail-panel h2 { font-size: 16px; margin: 0 0 4px; color: #1a1a1a; line-height: 1.4; }
+.dp-path { font-size: 11px; color: #aaa; margin-bottom: 14px; word-break: break-all; line-height: 1.6; }
+.dp-note { font-size: 12px; color: #999; font-style: italic; margin-bottom: 12px; }
+.dp-empty { color: #bbb; margin-top: 60px; text-align: center; line-height: 1.9; }
+.dp-section { margin-bottom: 16px; }
+.dp-label { font-size: 12px; font-weight: 700; color: #4e79a7; margin-bottom: 6px; border-left: 3px solid #4e79a7; padding-left: 7px; }
+.dp-body { font-size: 13px; line-height: 1.8; color: #444; }
+.dp-section ol { margin: 0; padding-left: 20px; }
+.dp-section ol li { line-height: 1.8; color: #444; }
+.dp-chips { line-height: 2.1; }
+.dp-chip { display: inline-block; background: #eef3fa; color: #3a6ea5; border: 1px solid #d6e2f2; border-radius: 12px; padding: 2px 11px; margin: 0 6px 0 0; font-size: 12px; cursor: pointer; }
+.dp-chip:hover { background: #dce8f7; }
+.dp-chip.static { cursor: default; background: #f3f3f5; color: #777; border-color: #e5e5e5; }
+.node-row { display: flex; align-items: center; padding: 2px 6px; border-radius: 4px; cursor: pointer; white-space: nowrap; line-height: 1.8; }
+.node-row:hover { background: #e8f0fe; }
+.instance-row { background: #fcfcfd; }
+.instance-row:hover { background: #fff8e1; }
+.toggle { display: inline-block; width: 16px; text-align: center; font-size: 11px; color: #999; user-select: none; flex-shrink: 0; }
+.toggle.collapsed { transform: rotate(-90deg); }
+.toggle.leaf { visibility: hidden; }
+.node-icon { margin-right: 5px; font-size: 13px; flex-shrink: 0; }
+.node-name { font-size: 13px; color: #333; }
+.instance-name { font-size: 12px; color: #b06ab3; font-style: italic; }
+.node-count { font-size: 10px; color: #aaa; margin-left: 5px; background: #f0f0f0; padding: 0 5px; border-radius: 8px; }
+.node-count.inst { background: #f3e8f7; color: #b06ab3; }
+.node-count.imgs { background: #e6f4f1; color: #2a9d8f; }
+.children { margin-left: 18px; border-left: 1px dashed #ddd; padding-left: 4px; }
+.highlight { background: #fff3cd !important; }
+.search-match { color: #e15759; font-weight: 600; }
+#result-count { font-size: 12px; color: #888; margin-left: 8px; }
+.gal-main img { width: 100%; border-radius: 6px; background: #f0f0f0; cursor: pointer; }
+.gal-bar { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 6px 0; }
+.gal-btn { border: 1px solid #ddd; background: #fff; border-radius: 6px; padding: 2px 12px; cursor: pointer; font-size: 12px; color: #555; }
+.gal-btn:hover { background: #f0f0f0; }
+#gal-pos { font-size: 12px; color: #888; min-width: 40px; text-align: center; }
+.gal-strip { display: flex; gap: 4px; overflow-x: auto; padding: 2px; }
+.gal-thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 4px; cursor: pointer; border: 2px solid transparent; flex-shrink: 0; }
+.gal-thumb.on { border-color: #4e79a7; }
+.gal-none { font-size: 12px; color: #bbb; }
+.gal-meta { display: flex; gap: 8px; justify-content: center; margin: 4px 0 2px; }
+.gal-score { font-size: 11px; padding: 1px 9px; border-radius: 9px; }
+.gal-score.km-hi { background: #e6f4ea; color: #1e7e34; }
+.gal-score.km-mid { background: #fff4e0; color: #b07d1a; }
+.gal-score.km-lo { background: #fdeaea; color: #c0392b; }
+.gal-score.ri { background: #e6f4f1; color: #2a9d8f; }
+.gal-score.none { background: #f3f3f5; color: #999; }
+.gal-cap { font-size: 12px; color: #777; line-height: 1.6; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div id="header">
+  <div id="title">demiwtg (EN)</div>
+  <div id="stats"></div>
+  <select id="score-field" onchange="onScoreFilter()" title="打分筛选：选择分数维度（匹配 kb_match / 丰富 richness）" style="padding:5px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;">
+    <option value="all">打分：全部</option>
+    <option value="km">打分：匹配</option>
+    <option value="ri">打分：丰富</option>
+  </select>
+  <select id="score-dir" onchange="onScoreFilter()" disabled style="padding:5px 4px;border:1px solid #ddd;border-radius:6px;font-size:12px;">
+    <option value="ge">≥</option>
+    <option value="le">≤</option>
+  </select>
+  <select id="score-thr" onchange="onScoreFilter()" disabled style="padding:5px 4px;border:1px solid #ddd;border-radius:6px;font-size:12px;">
+    <option value="10">10</option><option value="9">9</option><option value="8">8</option>
+    <option value="7" selected>7</option><option value="6">6</option><option value="5">5</option>
+    <option value="4">4</option><option value="3">3</option><option value="2">2</option>
+    <option value="1">1</option><option value="0">0</option>
+  </select>
+  <input type="text" id="search" placeholder="搜索标签名或实例..." />
+  <span id="result-count"></span>
+  <button class="btn" onclick="expandAll()">展开可见</button>
+  <button class="btn" onclick="collapseAll()">全部折叠</button>
+</div>
+<div id="breadcrumb" onclick="copyPath()">点击节点查看路径</div>
+<div id="tree-container"></div>
+<div id="splitter" title="拖拽调整右侧面板宽度，双击恢复默认"></div>
+<div id="detail-panel"><div class="dp-empty">点击左侧节点<br>查看知识库详情</div></div>
+
+<!-- 无服务模式：双击(file://)打开时，由 build/taxonomy.js / build/instances.js / build/imgs.js
+     把数据注入为全局变量（file:// 协议下浏览器禁止 fetch 本地文件）。若 sidecar 不存在，则回退到
+     fetch（需经 http 服务打开）。运行 `python3 viewer/build_viewer.py` 生成这些 sidecar，
+     其中 imgs.js 为实例 → 原图相对路径索引（../datasets/demiwtg/blobs/...，由 demiwtg/meta/images.jsonl 现场聚合）。
+     注意：原图位于 datasets/demiwtg/，file:// 双击打开时浏览器禁止读取，图片需经 HTTP 服务查看：
+       python3 -m http.server 8000（在仓库根运行） → http://localhost:8000/viewer/tag_tree_explorer.html -->
+<script src="build_en/taxonomy.js?v=1"></script>
+<script src="build_en/instances.js?v=1"></script>
+<script src="build_en/imgs.js?v=1"></script>
+<script>
+let treeData = null;
+window.ROLE_INTROS = {};
+let curDetailNode = null;   // 当前详情面板展示的节点（打分筛选变化时重绘用）
+
+// 打分控件联动：维度选「全部」时置灰方向/阈值框；无论是否有选中节点，
+// onchange 时都立即同步可用性（不能依赖详情面板渲染才启用）。
+function syncScoreControls() {
+    const fieldEl = document.getElementById("score-field");
+    const dirEl = document.getElementById("score-dir");
+    const thrEl = document.getElementById("score-thr");
+    const off = !fieldEl || fieldEl.value === "all";
+    if (dirEl) dirEl.disabled = off;
+    if (thrEl) thrEl.disabled = off;
+}
+
+// 按顶部打分过滤器筛选图片条目：维度（km/ri）× 方向（≥/≤）× 阈值（0-10），
+// 未打分的图在阈值档位下一律滤掉；按丰富度筛选时重排为丰富度降序（便于扫 case）。
+function applyScoreFilter(imgs) {
+    const fieldEl = document.getElementById("score-field");
+    const dirEl = document.getElementById("score-dir");
+    const thrEl = document.getElementById("score-thr");
+    const field = fieldEl ? fieldEl.value : "all";
+    if (field === "all") return imgs;
+    const dir = dirEl.value;
+    const thr = parseInt(thrEl.value, 10);
+    const out = imgs.filter(e => {
+        const v = e[field];
+        if (v == null) return false;
+        return dir === "ge" ? v >= thr : v <= thr;
+    });
+    if (field === "ri") out.sort((a, b) => b.ri - a.ri);
+    return out;
+}
+function onScoreFilter() {
+    syncScoreControls();
+    refreshImgBadges();
+    if (curDetailNode) showDetail(curDetailNode);
+}
+
+// 把标签树（taxonomy.json）的节点适配为查看器运行时模型。
+// 节点 instances 仅含实例名称（结构指针），富描述由 instances.json 提供。
+function adaptUnified(node) {
+    const v = { name: node.name, _path: node.path, depth: node.depth };
+    for (const k of KB_FIELDS) if (node[k] != null) v[k] = node[k];
+    const insts = node.instances || [];
+    if (insts.length) {
+        v.instances = insts.map(it => typeof it === "string" ? it : it.name);
+    }
+    if (node.children && node.children.length) v.children = node.children.map(adaptUnified);
+    return v;
+}
+
+// 由 instances.json 的实例列表构建 ROLE_INTROS 查表（key=实例名，name 全局唯一）。
+// 关键概念：节点 = 分类标签（subclass of 上级分类）；实例 = 实例标签（instance of 所属分类）。
+// 两者是不同知识对象，因此实例查表独立于节点 KB，且实例面板绝不回退显示分类标签的
+// 代表案例/关联标签。这里把「全部 source」的实例都纳入（不再只取 curated/templated），
+// 以便实例面板能展示别名与 query 词，并对无富文本的实例给出明确提示而非套用分类内容。
+function buildRoleIntros(insts) {
+    window.ROLE_INTROS = {};
+    for (const it of insts) {
+        // 契约（AGENTS.md 1.5）：instances.json 中 name 全局唯一，直接按名查表
+        window.ROLE_INTROS[it.name] = {
+            c: it.desc || "",         // 实例自身详细描述
+            s: it.source || "derived",
+            al: it.aliases || []      // 实例别称 / 别名
+        };
+    }
+}
+
+// 运行时加载数据：优先使用 sidecar 注入的全局变量（双击 file:// 无服务模式），
+// 否则回退到 fetch（需经 http 服务打开）。
+async function loadTaxonomy() {
+    const dp = document.getElementById("detail-panel");
+    try {
+        let taxDoc, metaDoc;
+        if (window.__TAXONOMY__ && window.__INSTANCES__) {
+            // 无服务模式：数据已由 data/*.js 注入为全局变量
+            taxDoc = window.__TAXONOMY__;
+            metaDoc = window.__INSTANCES__;
+        } else {
+            const [taxResp, metaResp] = await Promise.all([
+                fetch("../datasets/demiwtg/meta/taxonomy_en.json", { cache: "no-store" }),
+                fetch("../datasets/demiwtg/meta/instances_en.json", { cache: "no-store" })
+            ]);
+            if (!taxResp.ok) throw new Error("taxonomy.json HTTP " + taxResp.status);
+            if (!metaResp.ok) throw new Error("instances.json HTTP " + metaResp.status);
+            taxDoc = await taxResp.json();
+            metaDoc = await metaResp.json();
+        }
+        treeData = adaptUnified(taxDoc.tree);
+        buildRoleIntros(metaDoc.instances || []);
+        computeImgStats(treeData);
+        renderTree();
+        if (treeData) {
+            const n = countNodes(treeData);
+            const m = (metaDoc.instances || []).length;
+            document.getElementById("stats").textContent = n + " 节点 / " + m + " 实例";
+        }
+    } catch (e) {
+        const msg = "无法加载数据：" + e.message +
+            "\n\n若直接双击打开（file://），浏览器禁止 fetch 本地文件。两种解决方式：\n" +
+            "  1) 一次性生成 sidecar（无需服务器，双击即用）：\n" +
+            "       python3 viewer/build_viewer.py\n" +
+            "     它会写出 build/taxonomy.js 与 build/instances.js，之后双击本页即可。\n" +
+            "  2) 或启动本地服务：\n" +
+            "       python3 -m http.server 8000\n" +
+            "     然后访问 http://localhost:8000/viewer/tag_tree_explorer.html";
+        if (dp) dp.innerHTML = '<div class="dp-empty" style="white-space:pre-wrap">' + escapeHtml(msg) + '</div>';
+        const st = document.getElementById("stats"); if (st) st.textContent = "数据加载失败";
+        console.error(e);
+    }
+}
+
+function countNodes(n) {
+    let c = 1;
+    if (n.children) for (const ch of n.children) c += countNodes(ch);
+    return c;
+}
+
+// 子树统计：_names = 子树实例名去重集合；_subInst = 名单总数（子树去重）；
+// _instImg = 本节点直挂实例中有图的去重个数；_imgN = 对应图片张数；
+// _subInstImg/_subImgN = 含全部子孙节点的子树聚合。图片数据源为 imgs.js 注入的 __IMGS__
+//（standalone/file:// 无图模式下为 null，图片部分统计全 0，徽标只显示名单总数）。
+// 图片计数经顶部打分过滤器筛一道，阈值变化时由 refreshImgBadges 重算。
+function computeImgStats(node) {
+    const names = new Set(node.instances || []);
+    let instImg = 0, imgN = 0;
+    if (window.__IMGS__) {
+        for (const nm of names) {
+            const arr = window.__IMGS__[nm];
+            if (arr && arr.length) {
+                const f = applyScoreFilter(arr);
+                if (f.length) { instImg++; imgN += f.length; }
+            }
+        }
+    }
+    let subInstImg = instImg, subImgN = imgN;
+    if (node.children) {
+        for (const ch of node.children) {
+            computeImgStats(ch);
+            subInstImg += ch._subInstImg;
+            subImgN += ch._subImgN;
+            for (const nm of ch._names) names.add(nm);
+        }
+    }
+    node._names = names;
+    node._subInst = names.size;
+    node._instImg = instImg; node._imgN = imgN;
+    node._subInstImg = subInstImg; node._subImgN = subImgN;
+}
+
+// 徽标统一创建入口：节点显示「名单总数 · 有图实例数 / 图片张数」（子树聚合），
+// 实例行显示自身筛选后图片数；createNode 与 refreshImgBadges 共用。
+function imgBadgeEl(node) {
+    const fEl = document.getElementById("score-field");
+    const fOn = fEl && fEl.value !== "all";
+    if (node._instance === true) {
+        const raw = window.__IMGS__ ? (window.__IMGS__[node.name] || []) : [];
+        const n = applyScoreFilter(raw).length;
+        if (!n) return null;
+        const badge = document.createElement("span");
+        badge.className = "node-count imgs";
+        badge.textContent = "\uD83D\uDDBC " + n + " \u56FE";
+        if (n !== raw.length) badge.title = "\u7B5B\u9009 " + n + " / \u5171 " + raw.length + " \u5F20";
+        return badge;
+    }
+    const subInst = node._subInst || 0;
+    const subInstImg = node._subInstImg || 0, subImgN = node._subImgN || 0;
+    if (!subInst && !subInstImg) return null;
+    const badge = document.createElement("span");
+    badge.className = "node-count imgs";
+    badge.textContent = "\uD83C\uDFF7 " + subInst.toLocaleString() + " \u5B9E\u4F8B" +
+        (subInstImg ? " \u00B7 \uD83D\uDDBC " + subInstImg.toLocaleString() +
+         " \u5B9E\u4F8B / " + subImgN.toLocaleString() + " \u56FE" : "");
+    badge.title = "\u5B50\u6811\u540D\u5355\u53BB\u91CD\u5171 " + subInst + " \u4E2A\u5B9E\u4F8B\uFF1B" +
+        (fOn ? "\u6253\u5206\u7B5B\u9009\u540E\uFF1A" : "") +
+        "\u5176\u4E2D " + subInstImg + " \u4E2A\u6709\u56FE\uFF0C\u5408\u8BA1 " + subImgN + " \u5F20\u56FE\u7247";
+    return badge;
+}
+
+// 打分筛选变化时原位刷新已渲染树行的图片徽标（不清空重渲，保留展开状态）
+function refreshImgBadges() {
+    if (!treeData) return;
+    computeImgStats(treeData);
+    container.querySelectorAll(".node-row").forEach(row => {
+        const node = row._nodeRef;
+        if (!node) return;
+        const old = row.querySelector(".node-count.imgs");
+        if (old) old.remove();
+        const badge = imgBadgeEl(node);
+        if (badge) row.appendChild(badge);
+    });
+}
+
+if (treeData) document.getElementById("stats").textContent = countNodes(treeData) + " 节点";
+
+let currentRoot = null;
+const container = document.getElementById("tree-container");
+
+function getFilteredRoot() {
+    // 前缀精简后根 demiwtg 直挂 29 域，无子树过滤（旧 IP/通用双树过滤器已废）
+    return treeData;
+}
+
+// Lazy render: children DOM created only on expand. Instances rendered as sub-items.
+function createNode(node, depth) {
+    const isInstance = node._instance === true;
+    const hasChildren = node.children && node.children.length > 0;
+    const hasInstances = node.instances && node.instances.length > 0;
+    const wrap = document.createElement("div");
+
+    const row = document.createElement("div");
+    row.className = "node-row" + (isInstance ? " instance-row" : "");
+    row._nodeRef = node;   // refreshImgBadges 原位刷新徽标时反查节点用
+
+    const toggle = document.createElement("span");
+    if (isInstance) {
+        toggle.className = "toggle leaf";
+        toggle.textContent = "\u25C6";
+    } else {
+        toggle.className = "toggle" + ((hasChildren || hasInstances) ? " collapsed" : " leaf");
+        toggle.textContent = "\u25BC";
+    }
+    row.appendChild(toggle);
+
+    const icon = document.createElement("span");
+    icon.className = "node-icon";
+    icon.textContent = isInstance ? "\u25C6" : (hasChildren || hasInstances ? "\uD83D\uDCC2" : "\uD83C\uDF96");
+    row.appendChild(icon);
+
+    const name = document.createElement("span");
+    name.className = "node-name" + (isInstance ? " instance-name" : "");
+    name.textContent = node.name;
+    row.appendChild(name);
+
+    // 子节点数徽标（实例名单总数由下方统计徽标承载，不再重复显示）
+    if (!isInstance && hasChildren) {
+        const cnt = document.createElement("span");
+        cnt.className = "node-count";
+        cnt.textContent = node.children.length;
+        row.appendChild(cnt);
+    }
+
+    // 图片统计徽标（imgBadgeEl 统一创建，打分筛选变化时由 refreshImgBadges 原位刷新）
+    const badge = imgBadgeEl(node);
+    if (badge) row.appendChild(badge);
+
+    row.onclick = function(e) {
+        e.stopPropagation();
+        document.getElementById("breadcrumb").textContent = node._path || node.name;
+        showDetail(node);
+    };
+
+    if (!isInstance && (hasChildren || hasInstances)) {
+        let expanded = false;
+        let childrenDiv = null;
+        toggle.onclick = function(e) {
+            e.stopPropagation();
+            if (!expanded) {
+                if (!childrenDiv) {
+                    childrenDiv = document.createElement("div");
+                    childrenDiv.className = "children";
+                    if (hasChildren) {
+                        for (const child of node.children) {
+                            childrenDiv.appendChild(createNode(child, depth + 1));
+                        }
+                    }
+                    if (hasInstances) {
+                        for (const inst of node.instances) {
+                            const instNode = {
+                                name: inst,
+                                _instance: true,
+                                _path: (node._path || node.name) + " / " + inst,
+                                _parent: node,
+                                children: []
+                            };
+                            childrenDiv.appendChild(createNode(instNode, depth + 1));
+                        }
+                    }
+                    wrap.appendChild(childrenDiv);
+                }
+                childrenDiv.style.display = "";
+                toggle.classList.remove("collapsed");
+                expanded = true;
+            } else {
+                childrenDiv.style.display = "none";
+                toggle.classList.add("collapsed");
+                expanded = false;
+            }
+        };
+    }
+
+    wrap.appendChild(row);
+    return wrap;
+}
+
+const KB_FIELDS = ["knowledge_intro", "aliases", "representative_cases", "related_tags"];
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function hasKB(n) { return KB_FIELDS.some(k => n && n[k] && (Array.isArray(n[k]) ? n[k].length : true)); }
+function findIntro(name, parentPath) {
+    // name 全局唯一（AGENTS.md 1.5），直接按名查表；parentPath 仅为兼容旧调用保留
+    return window.ROLE_INTROS ? (window.ROLE_INTROS[name] || null) : null;
+}
+
+function showDetail(node) {
+    const dp = document.getElementById("detail-panel");
+    curDetailNode = node || null;
+    if (!node) { dp.innerHTML = '<div class="dp-empty">点击左侧节点<br>查看知识库详情</div>'; return; }
+
+    // 实例标签（instance of 所属分类）：只展示实例自身的知识库，
+    // 绝对不回退到所属「分类标签」的 KB（那是 subclass of 体系，会错误地显示代表案例等）。
+    if (node._instance === true) {
+        const intro = (typeof findIntro === "function") ? findIntro(node.name, node._parent ? node._parent._path : "") : null;
+        const parentName = node._parent ? (node._parent.name || "") : "";
+        let html = '<h2 style="font-size:14px">' + escapeHtml(node.name) + '</h2>';
+        html += '<div class="dp-path">' + escapeHtml(node._path || "") + '</div>';
+        const srcTag = intro ? (intro.s === "curated" ? "精确" : (intro.s === "llm" ? "生成" : (intro.s === "templated" ? "归类" : "派生"))) : "";
+        html += '<div class="dp-note">实例标签 · instance of「' + escapeHtml(parentName || "?") + '」' + (srcTag ? " · " + srcTag : "") + '</div>';
+
+        // 实例图片（由 build/imgs.js 注入 {p, km, ri, cap} 条目，按 kb_match 降序；
+        // standalone 或 file:// 双击时不可用）；经顶部打分过滤器再筛一道
+        const rawImgs = (window.__IMGS__ && window.__IMGS__[node.name]) || [];
+        const imgs = applyScoreFilter(rawImgs);
+        gal.imgs = imgs; gal.i = 0;
+        if (imgs.length) {
+            const kms = imgs.filter(e => e.km != null).map(e => e.km);
+            const avgKm = kms.length ? (kms.reduce((a, b) => a + b, 0) / kms.length).toFixed(1) : null;
+            const countTxt = (imgs.length !== rawImgs.length)
+                ? '筛选 ' + imgs.length + ' / 共 ' + rawImgs.length
+                : imgs.length + '';
+            const fEl = document.getElementById("score-field");
+            const sortTxt = (fEl && fEl.value === "ri") ? "按丰富度降序" : "按匹配度降序";
+            html += '<div class="dp-section"><div class="dp-label">图片（' + countTxt + ' 张' +
+                    (avgKm ? ' · 平均匹配 ' + avgKm : '') + '，' + sortTxt + '）</div>';
+            html += '<div class="gal-main"><img id="gal-img" src="' + imgs[0].p + '" alt="' + escapeHtml(node.name) + '" onclick="galMove(1)" title="点击切换下一张"></div>';
+            html += '<div class="gal-meta" id="gal-meta">' + galScoreHtml(0) + '</div>';
+            html += '<div class="gal-bar"><button class="gal-btn" onclick="galMove(-1)">&#9664;</button>' +
+                    '<span id="gal-pos">1 / ' + imgs.length + '</span>' +
+                    '<button class="gal-btn" onclick="galMove(1)">&#9654;</button></div>';
+            html += '<div class="gal-cap" id="gal-cap">' + escapeHtml(imgs[0].cap || "") + '</div>';
+            html += '<div class="gal-strip">' +
+                    imgs.map((e, i) => '<img class="gal-thumb' + (i === 0 ? ' on' : '') + '" src="' + e.p + '" onclick="galJump(' + i + ')" title="第 ' + (i + 1) + ' 张 · 匹配 ' + (e.km != null ? e.km : "-") + ' / 丰富 ' + (e.ri != null ? e.ri : "-") + '">').join("") +
+                    '</div></div>';
+        } else if (rawImgs.length) {
+            html += '<div class="dp-section"><div class="dp-label">图片</div><div class="gal-none">共 ' + rawImgs.length + ' 张，当前打分筛选下无匹配图片（调整顶部「打分」过滤器）</div></div>';
+        } else {
+            html += '<div class="dp-section"><div class="dp-label">图片</div><div class="gal-none">暂无已采集图片，或当前以 file:// 双击打开（浏览器禁止加载父目录图片，请用 HTTP 服务打开）</div></div>';
+        }
+
+        if (intro) {
+            const detail = intro.c;
+            if (detail) html += '<div class="dp-section"><div class="dp-label">详细介绍</div><div class="dp-body">' + escapeHtml(detail) + '</div></div>';
+            // 别称 / 别名（保留）
+            if (intro.al && intro.al.length) {
+                html += '<div class="dp-section"><div class="dp-label">别称 / 别名</div><div class="dp-chips">' +
+                    intro.al.map(t => '<span class="dp-chip static">' + escapeHtml(t) + '</span>').join("") + '</div></div>';
+            }
+            // query 词（检索扩展词，与 multimodal 约定一致：取别名首项，无别名则取实例名）
+            const q = (intro.al && intro.al.length) ? intro.al[0] : node.name;
+            html += '<div class="dp-section"><div class="dp-label">query 词</div><div class="dp-body" style="font-family:ui-monospace,Menlo,Consolas,monospace">' + escapeHtml(q) + '</div></div>';
+            if (!detail && (!intro.al || !intro.al.length)) {
+                html += '<div class="dp-note" style="color:#bbb;margin-top:8px">本实例暂无独立知识库内容，仅作为「' + escapeHtml(parentName || "") + '」分类下的实例标签。</div>';
+            }
+        } else {
+            html += '<div class="dp-empty" style="margin-top:20px">本实例暂无独立知识库<br><small>归属分类标签：' + escapeHtml(parentName || "") + '</small></div>';
+        }
+        dp.innerHTML = html;
+        dp.scrollTop = 0;
+        return;
+    }
+
+    if (!hasKB(node)) {
+        dp.innerHTML = '<h2>' + escapeHtml(node.name) + '</h2>' +
+            '<div class="dp-path">' + escapeHtml(node._path || "") + '</div>' +
+            '<div class="dp-empty" style="margin-top:30px">该节点暂未补充知识库字段<br><small>知识介绍 / 别名 / 案例 / 关联标签</small></div>';
+        dp.scrollTop = 0;
+        return;
+    }
+
+    let html = '<h2>' + escapeHtml(node.name) + '</h2>';
+    html += '<div class="dp-path">' + escapeHtml(node._path || "") + '</div>';
+    html += renderKB(node);
+    dp.innerHTML = html;
+    dp.scrollTop = 0;
+}
+
+function renderKB(node) {
+    let html = "";
+    if (node.knowledge_intro) {
+        html += '<div class="dp-section"><div class="dp-label">知识介绍</div><div class="dp-body">' + escapeHtml(node.knowledge_intro) + '</div></div>';
+    }
+    if (node.aliases && node.aliases.length) {
+        html += '<div class="dp-section"><div class="dp-label">别称 / 别名</div><div class="dp-chips">' +
+            node.aliases.map(t => '<span class="dp-chip static">' + escapeHtml(t) + '</span>').join("") + '</div></div>';
+    }
+    if (node.representative_cases && node.representative_cases.length) {
+        html += '<div class="dp-section"><div class="dp-label">代表案例</div><ol>' +
+            node.representative_cases.map(c => '<li>' + escapeHtml(c) + '</li>').join("") + '</ol></div>';
+    }
+    if (node.related_tags && node.related_tags.length) {
+        html += '<div class="dp-section"><div class="dp-label">关联标签（可点击跳转）</div><div class="dp-chips">' +
+            node.related_tags.map(t => '<span class="dp-chip" onclick="jumpToTag(\'' + escapeHtml(t).replace(/'/g, "&#39;") + '\')">' + escapeHtml(t) + '</span>').join("") + '</div></div>';
+    }
+    return html;
+}
+
+function jumpToTag(tag) {
+    const box = document.getElementById("search");
+    box.value = tag;
+    doSearch();
+    const dp = document.getElementById("detail-panel");
+    dp.innerHTML = '<div class="dp-empty">已在树中定位<br>「' + escapeHtml(tag) + '」</div>';
+    dp.scrollTop = 0;
+}
+
+function renderTree() {
+    if (!treeData) return;
+    container.innerHTML = "";
+    currentRoot = getFilteredRoot();
+    container.appendChild(createNode(currentRoot, 0));
+    const rootToggle = container.querySelector("#tree-container > div > .node-row > .toggle");
+    if (rootToggle) rootToggle.click();
+    document.getElementById("stats").textContent = countNodes(currentRoot) + " 节点";
+}
+
+function expandAll() {
+    container.querySelectorAll(".toggle.collapsed:not(.leaf)").forEach(t => {
+        const p = t.parentElement.parentElement;
+        if (p.style.display !== "none") t.click();
+    });
+}
+
+function collapseAll() {
+    container.querySelectorAll(".toggle:not(.collapsed):not(.leaf)").forEach(t => t.click());
+}
+
+function copyPath() {
+    const text = document.getElementById("breadcrumb").textContent;
+    if (!text || text === "点击节点查看路径") return;
+    navigator.clipboard.writeText(text).then(() => {
+        const orig = document.getElementById("breadcrumb").textContent;
+        document.getElementById("breadcrumb").textContent = "\u2705 \u5DF2\u590D\u5236: " + text;
+        setTimeout(() => { document.getElementById("breadcrumb").textContent = orig; }, 1500);
+    });
+}
+
+let searchTimer;
+document.getElementById("search").addEventListener("input", function() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(doSearch, 300);
+});
+
+// 实例图片画廊：gal.imgs 为当前实例的图片条目列表（{p, km, ri, cap}），
+// galJump 切换主图、分数徽标与 caption 并高亮胶片条。
+let gal = { imgs: [], i: 0 };
+function galScoreHtml(i) {
+    const e = gal.imgs[i];
+    if (!e) return "";
+    let s = "";
+    if (e.km != null) {
+        const cls = e.km >= 7 ? "km-hi" : (e.km >= 4 ? "km-mid" : "km-lo");
+        s += '<span class="gal-score ' + cls + '" title="kb_match：图片内容与实体知识的匹配度（0-10）">匹配 ' + e.km + '</span>';
+    }
+    if (e.ri != null) {
+        s += '<span class="gal-score ri" title="richness：图片信息丰富度（0-10）">丰富 ' + e.ri + '</span>';
+    }
+    if (!s) s = '<span class="gal-score none">未打分</span>';
+    return s;
+}
+function galMove(d) { galJump(gal.i + d); }
+function galJump(i) {
+    const n = gal.imgs.length;
+    if (!n) return;
+    gal.i = ((i % n) + n) % n;
+    const e = gal.imgs[gal.i];
+    const img = document.getElementById("gal-img");
+    if (img) img.src = e.p;
+    const pos = document.getElementById("gal-pos");
+    if (pos) pos.textContent = (gal.i + 1) + " / " + n;
+    const meta = document.getElementById("gal-meta");
+    if (meta) meta.innerHTML = galScoreHtml(gal.i);
+    const cap = document.getElementById("gal-cap");
+    if (cap) cap.textContent = e.cap || "";
+    document.querySelectorAll(".gal-thumb").forEach((t, idx) => t.classList.toggle("on", idx === gal.i));
+}
+
+function doSearch() {
+    if (!treeData) return;
+    const query = document.getElementById("search").value.trim().toLowerCase();
+    const rc = document.getElementById("result-count");
+
+    if (!query) {
+        rc.textContent = "";
+        renderTree();
+        return;
+    }
+
+    const matches = [];
+    function search(node, parents) {
+        const selfMatch = node.name.toLowerCase().includes(query);
+        let matchedInst = [];
+        if (node.instances) {
+            for (const inst of node.instances) {
+                if (inst.toLowerCase().includes(query)) matchedInst.push(inst);
+            }
+        }
+        if (selfMatch || matchedInst.length > 0) {
+            const synChildren = [];
+            if (matchedInst.length > 0) {
+                for (const inst of matchedInst) {
+                    synChildren.push({
+                        name: inst, _instance: true,
+                        _path: (node._path || node.name) + " / " + inst, children: []
+                    });
+                }
+            }
+            const syn = {
+                name: node.name, _path: node._path,
+                _instance: node._instance || false,
+                instances: null, children: synChildren
+            };
+            matches.push({ syn: syn, parents: parents.slice() });
+        }
+        if (node.children) {
+            for (const ch of node.children) search(ch, parents.concat([node]));
+        }
+    }
+    search(currentRoot, []);
+
+    rc.textContent = matches.length + " \u4E2A\u7ED3\u679C";
+    container.innerHTML = "";
+
+    if (matches.length === 0) {
+        container.innerHTML = '<div style="padding:20px;color:#999;">\u672A\u627E\u5230\u5339\u914D</div>';
+        return;
+    }
+
+    const seen = new Set();
+    for (const m of matches) {
+        const pathKey = (m.parents.concat([m.syn])).map(n => n.name).join(" > ");
+        if (seen.has(pathKey)) continue;
+        seen.add(pathKey);
+        container.appendChild(renderSyntheticMatch(m.syn, m.parents));
+    }
+}
+
+function renderSyntheticMatch(synNode, parentChain) {
+    let rootSyn = { name: currentRoot.name, _path: currentRoot._path, children: [] };
+    let cursor = rootSyn;
+    for (const p of parentChain) {
+        const child = { name: p.name, _path: p._path, children: [] };
+        cursor.children.push(child);
+        cursor = child;
+    }
+    cursor.children.push(synNode);
+
+    const wrap = createNode(rootSyn, 0);
+    wrap.querySelectorAll(".toggle.collapsed").forEach(t => t.click());
+    return wrap;
+}
+
+// 分隔条拖拽调整右侧详情面板宽度（localStorage 持久化；双击恢复默认）
+(function() {
+    const sp = document.getElementById("splitter");
+    const rootEl = document.documentElement;
+    const clamp = w => Math.max(260, Math.min(w, Math.floor(window.innerWidth * 0.8)));
+    const setW = w => rootEl.style.setProperty("--panel-w", clamp(w) + "px");
+    const saved = parseInt(localStorage.getItem("viewer-panel-w") || "", 10);
+    if (saved) setW(saved);
+    let drag = false;
+    sp.addEventListener("pointerdown", e => {
+        drag = true; sp.setPointerCapture(e.pointerId); sp.classList.add("drag");
+        document.body.style.userSelect = "none";
+    });
+    sp.addEventListener("pointermove", e => { if (drag) setW(window.innerWidth - e.clientX); });
+    const stop = () => {
+        if (!drag) return;
+        drag = false; sp.classList.remove("drag");
+        document.body.style.userSelect = "";
+        localStorage.setItem("viewer-panel-w", rootEl.style.getPropertyValue("--panel-w") || "380px");
+    };
+    sp.addEventListener("pointerup", stop);
+    sp.addEventListener("pointercancel", stop);
+    sp.addEventListener("dblclick", () => {
+        rootEl.style.setProperty("--panel-w", "380px");
+        localStorage.removeItem("viewer-panel-w");
+    });
+})();
+
+// Initial render: 运行时直接读取统一 JSON
+loadTaxonomy();
+</script>
+
+</body>
+</html>
