@@ -48,6 +48,14 @@ bagel/
 # modelhub 子项目（独立仓库，自带 .git 与 .gitignore，整体不入主仓；见 AGENTS.md 架构决策 2026-08-25）
 modelhub/
 
+# webgate 模块运行时重物（SearXNG 上游浅克隆、独立 venv、日志/pid、含 secret 的运行配置；
+# 脚本与 settings.yml.example 入库，见 AGENTS.md 架构决策 2026-09-04）
+data_pipeline/webgate/.venv/
+data_pipeline/webgate/searxng/
+data_pipeline/webgate/log/
+data_pipeline/webgate/run/
+data_pipeline/webgate/settings.yml
+
 # 本地模型权重与部署产物（Qwen3.8-27B 等，勿提交）
 models/
 

@@ -1,6 +1,6 @@
 """edit（编辑）赛道评测样本抽样：从本仓数据集分层抽评测用图。
 
-抽样源是 collect_v2 权威清单 metadata.jsonl（质量字段 quality/identity/focus
+抽样源是 data_pipeline 权威清单 metadata.jsonl（质量字段 quality/identity/focus
 在它身上，不在 images.jsonl）；实例 → 树分支经 taxonomy/mount_map.py 现算
 （挂载关系不落盘的解耦契约，AGENTS.md 1.5）。
 
@@ -44,7 +44,27 @@ BENCH_ROOT = SUB_DIR.parent                                  # benchmark/
 REPO_ROOT = BENCH_ROOT.parent                                # 仓库根
 sys.path.insert(0, str(REPO_ROOT / "data"))    # taxonomy 包已迁至 data/taxonomy/
 
-from taxonomy.mount_map import load_mount_map                 # noqa: E402
+def load_mount_map(taxonomy_path):                                   # noqa: E402
+    """挂载聚合最小副本（原 taxonomy.mount_map；curation 已迁出本仓）。"""
+    import json
+    from collections import defaultdict
+    with open(taxonomy_path, encoding="utf-8") as f:
+        tree = json.load(f).get("tree") or {}
+    mounts = defaultdict(list)
+
+    def walk(n):
+        path = n.get("path", "")
+        for nm in n.get("instances") or []:
+            if isinstance(nm, dict):
+                nm = nm.get("name")
+            nm = str(nm).strip() if nm is not None else ""
+            if nm and path and path not in mounts[nm]:
+                mounts[nm].append(path)
+        for ch in n.get("children") or []:
+            walk(ch)
+
+    walk(tree)
+    return dict(mounts)
 
 META_DIR = REPO_ROOT / "datasets" / "demiwtg" / "meta"
 OUT_DIR = SUB_DIR / "data"

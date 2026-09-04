@@ -9,7 +9,7 @@ so the viewer works on double-click with NO running server.
 Generated artifacts (gitignored, NOT data) go to viewer/build/:
     build/taxonomy.js / build/instances.js          sidecars (default)
     build/imgs.js                                    实例 → 图片索引（路径 + VLM 打分）
-                                                      （由 datasets/demiwtg/meta/images.jsonl 现场聚合，
+                                                      （由 datasets/demiwtg/meta/metadata.jsonl 现场聚合，
                                                       每项 {p, km, ri, cap}：相对路径/kb_match/richness/caption，
                                                       按 kb_match 降序（同分按 richness 降序）；
                                                       路径为 ../datasets/demiwtg/blobs/... 原图，不生成缩略图；
@@ -25,7 +25,7 @@ Usage:
     python3 viewer/build_viewer.py --standalone     # write build/tag_tree_explorer.standalone.html (single self-contained file)
     python3 viewer/build_viewer.py --standalone --out my_viewer.html
 
-Regenerate after ANY change to taxonomy.json, instances.json or images.jsonl.
+Regenerate after ANY change to taxonomy.json, instances.json or metadata.jsonl.
 """
 import argparse
 import json
@@ -39,12 +39,12 @@ META = ROOT / "datasets" / "demiwtg" / "meta" / "instances.json"
 OUT_TAX = BUILD / "taxonomy.js"
 OUT_META = BUILD / "instances.js"
 VIEWER = ROOT / "viewer" / "tag_tree_explorer.html"
-IMAGES_JSONL = ROOT / "datasets" / "demiwtg" / "meta" / "images.jsonl"
+MANIFEST = ROOT / "datasets" / "demiwtg" / "meta" / "metadata.jsonl"
 BLOBS = ROOT / "datasets" / "demiwtg" / "blobs"
 IMGS_JS = BUILD / "imgs.js"
 
 # English parallel version (2026-08-24): fully independent data pair; no images
-# (EN instance names have zero intersection with images.jsonl tag space).
+# (EN instance names have zero intersection with metadata.jsonl tag space).
 BUILD_EN = ROOT / "viewer" / "build_en"
 TAX_EN = ROOT / "datasets" / "demiwtg" / "meta" / "taxonomy_en.json"
 META_EN = ROOT / "datasets" / "demiwtg" / "meta" / "instances_en.json"
@@ -168,11 +168,11 @@ def _by_score(entries):
 
 
 def build_imgs_js():
-    if not IMAGES_JSONL.exists():
-        print("[warn] images.jsonl 不存在，imgs.js 未生成。")
+    if not MANIFEST.exists():
+        print("[warn] metadata.jsonl 不存在，imgs.js 未生成。")
         return
     idx: dict[str, list] = {}
-    with open(IMAGES_JSONL, encoding="utf-8") as f:
+    with open(MANIFEST, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:

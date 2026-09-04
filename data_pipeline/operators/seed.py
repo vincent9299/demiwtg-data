@@ -1,20 +1,17 @@
-"""collect_v2 种子算子：中文实例 → 检索种子（语言投影），位于 op_search 之前。
+"""collect_v2 投影算子：实例行 → 种子行集（自包含，2026-09-04·十 dict 行化）。
 
-契约（.qoder/handoff_collect_v2.md §4.4 + 2026-08-20 用户拍板）：
-- 每实例产 1-2 个 seed：中文本体 seed（必有，query=实例名，lang="zh"）+
-  西文投影 seed（最多一条，lang="latin"）；
-- 西文投影来源：流式让 LLM 判定存量 aliases 中的西文候选是否**同实体西文名**
-  （存量 aliases 混类目泛词，旧拍板「query 零信任」，不清洗不得直接消费）；
-- 判定上下文含实体知识（2026-08-20 用户拍板：拼入 desc，冷门实体也判得准）：
-  desc 全量送判不截断（契约长度本只有 150-350 字）；查表由调用方负责，
-  本算子只消费传入的 desc；
-- 中文别名变体（慕田峪/慕田峪关这类）**不产 seed**——守住「不选词」纪律；
-- LLM 判定结果**落盘词表 + 增量补判**：判过的查表零 LLM 成本，只对新实例调用；
-- 判定失败（重试耗尽）→ 不产西文 seed（宁缺毋滥），**不落词表**下次重判。
+行契约（demiflow 原生 dict 行）：
+- 读键：name、aliases?、desc?
+- 产行：{name, query, lang}（中文本体 seed 必有；西文投影 seed 依词表/LLM
+  判定产出，最多一条）
 
-词表文件：datasets/demiwtg/meta/alias_western.json，格式 {实例名: 西文投影或 null}；
-与 instances.json/taxonomy.json 同目录（taxonomy 只读约定针对采集期消费，词表是本算子
-专属持久化产物，在 meta/ 白名单登记）。
+知识口径（与存量词表可比，勿动）：
+- 三态语义：str=合格西文投影；None=判过无合格（认缺不重判）；
+  未判=触发 LLM 判定；判定失败（None 返回）不落词表下次重判；
+- 防幻觉：选中必须是送判候选之一（不许 LLM 自造新名）；
+- 西文候选粗筛：含拉丁字母、去重保序、封顶 MAX_CANDIDATES。
+
+资源：LLM 端点 demiflow 平台注册表（"demiwtg_vlm"，声明在 annotate.py）。
 """
 
 from __future__ import annotations
@@ -25,19 +22,12 @@ import os
 import re
 from typing import Optional
 
-import httpx
+from demiflow.collect.llm import get_llm_client
+from demiflow.data.plan import StreamStage
 
-from collect_v2.op_search import Seed
-
-DEFAULT_ENDPOINT = "http://localhost:8000/v1/chat/completions"
-DEFAULT_MODEL = "qwen3.8-27b"
-RETRIES = 3               # 判定重试次数（固定间隔，与 infra 口径一致）
-RETRY_INTERVAL = 1.0
-LLM_TIMEOUT = 60.0        # 纯文本短请求，远小于打标的 600s
-MAX_CANDIDATES = 8        # 单实例送判的西文候选上限（防超长别名表）
-
-# 西文候选粗筛：含拉丁字母且非纯符号（缩小送判量，判定本身由 LLM 把关）
-_LATIN_RE = re.compile(r"[A-Za-z]")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DEFAULT_ALIAS_CACHE = os.path.join(
+    REPO_ROOT, "datasets", "demiwtg", "meta", "alias_western.json")
 
 JUDGE_SYSTEM = (
     "你是实体别名审核专家。给定一个实体名称、可能的实体背景知识与若干候选西文词，"
@@ -56,6 +46,14 @@ JUDGE_SYSTEM = (
 # 实体背景知识段：desc 全量拼入不截断（契约长度 150-350 字，无超长风险）
 JUDGE_USER_TPL = "实体：{name}\n{kb_block}候选：{cands}\n请判定。"
 KB_BLOCK_TPL = "实体背景知识：{desc}\n"
+
+RETRIES = 3               # 判定重试次数（固定间隔，与 demiflow.collect.net 口径一致）
+RETRY_INTERVAL = 1.0
+LLM_TIMEOUT = 60.0        # 纯文本短请求，远小于打标的 600s
+MAX_CANDIDATES = 8        # 单实例送判的西文候选上限（防超长别名表）
+
+# 西文候选粗筛：含拉丁字母且非纯符号（缩小送判量，判定本身由 LLM 把关）
+_LATIN_RE = re.compile(r"[A-Za-z]")
 
 
 class SeedCache:
@@ -106,30 +104,22 @@ def latin_candidates(aliases) -> list:
     return out
 
 
-async def _judge(client: httpx.AsyncClient, name: str, cands: list,
-                 user_prompt: str, *,
-                 endpoint: str, model: str) -> Optional[str]:
+async def _judge(name: str, cands: list, user_prompt: str) -> Optional[str]:
     """LLM 判定：返回合格西文投影；全部不合格返回 ""；判定失败返回 None。
 
     三态区分是契约要求：""（判过无合格→落词表认缺）≠ None（失败→不落词表）。
-    """
-    payload = {
-        "model": model,
-        "max_tokens": 80,
-        "temperature": 0.0,
-        "chat_template_kwargs": {"enable_thinking": False},
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": JUDGE_SYSTEM},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
+    机制（HTTP/参数构造）在 demiflow 平台端点资源；口径（三态语义/
+    防幻觉校验/重试循环）在本函数。"""
+    messages = [
+        {"role": "system", "content": JUDGE_SYSTEM},
+        {"role": "user", "content": user_prompt},
+    ]
     cand_set = {c.lower() for c in cands}
     for attempt in range(RETRIES):
         try:
-            r = await client.post(endpoint, json=payload, timeout=LLM_TIMEOUT)
-            r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"]
+            content = await get_llm_client("demiwtg_vlm").chat(
+                messages, max_tokens=80, temperature=0.0,
+                json_mode=True, thinking=False, timeout=LLM_TIMEOUT)
             m = re.search(r"\{[^{}]*\"picked\"[^{}]*\}", content, re.S)
             if m:
                 picked = json.loads(m.group(0)).get("picked")
@@ -146,44 +136,45 @@ async def _judge(client: httpx.AsyncClient, name: str, cands: list,
     return None
 
 
-async def project(
-    name: str,
-    aliases,
-    cache: SeedCache,
-    *,
-    desc: str = "",
-    client: Optional[httpx.AsyncClient] = None,
-    endpoint: str = DEFAULT_ENDPOINT,
-    model: str = DEFAULT_MODEL,
-) -> list:
-    """单实例投影：返回 [中文 seed] 或 [中文 seed, 西文 seed]。
+async def project(name: str, aliases: list, cache: SeedCache,
+                  *, desc: str = "") -> list:
+    """单实例投影：返回 [{name, query, lang}] 种子行集。
 
     中文本体 seed 必有；西文 seed 依词表/LLM 判定产出（最多一条）。
     desc 为实体背景知识（instances.json 的 desc，全量送判不截断），
     拼入判定上下文提升冷门实体判定准确率。
     """
-    seeds = [Seed(name=name, query=name, lang="zh")]
+    seeds = [{"name": name, "query": name, "lang": "zh"}]
     judged, value = cache.get(name)
     if not judged:
         cands = latin_candidates(aliases)
         if not cands:
             cache.put(name, None)    # 无西文候选：直接认缺落词表，不费 LLM
         else:
-            http = client or httpx.AsyncClient()
-            own = client is None
             kb_block = (KB_BLOCK_TPL.format(desc=desc.strip())
                         if desc and desc.strip() else "")
             user_prompt = JUDGE_USER_TPL.format(
                 name=name, kb_block=kb_block, cands="、".join(cands))
-            try:
-                value = await _judge(http, name, cands, user_prompt,
-                                     endpoint=endpoint, model=model)
-            finally:
-                if own:
-                    await http.aclose()
+            value = await _judge(name, cands, user_prompt)
             if value is None:        # 判定失败：不落词表，下次重判（宁缺毋滥）
                 return seeds
             cache.put(name, value or None)
     if value:
-        seeds.append(Seed(name=name, query=value, lang="latin"))
+        seeds.append({"name": name, "query": value, "lang": "latin"})
     return seeds
+
+
+class SeedStage(StreamStage):
+    """投影算子（demiflow 规范）：实例行 → 种子行集。
+
+    策略默认值随算子声明，编排层可按 label 覆盖并发/队列深度。"""
+    label = "seed"
+    concurrency = 16
+    queue_depth = 64
+
+    def __init__(self, cache: SeedCache):
+        self.cache = cache
+
+    async def __call__(self, inst):
+        return await project(inst["name"], inst.get("aliases") or [],
+                             self.cache, desc=inst.get("desc") or "")

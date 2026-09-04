@@ -5,17 +5,17 @@
 - 输出按源原生相关度排序的候选列表，adapter 不重排、不筛选、不凑数；
 - K 封顶不分页深翻：语义/爬虫源 ≤5，结构化源 10-20；
 - 列表不足或为空原样返回，认缺是链层的事；
-- adapter 只产结构化候选，不碰主清单；所有请求走 infra.request。
+- adapter 只产结构化候选，不碰主清单；所有请求走 net.request。
 
-数据流（用户拍板）：算子链是数据算子流，全链路流转统一的 Item 记录
-（类似 Ray Dataset 的行），各算子在 Item 上追加自己的产出字段，
+数据流（2026-09-04·十 dict 行化）：demiflow 原生 dict 行流转，
+各算子在行上追加自己的产出键（键契约见各算子 docstring），
 不设独立的 Candidate/DownloadResult 类型。
 
 候选 URL 契约（2026-08-21 用户拍板，数据用途定案为训练数据）：
 - adapter 产 content_urls：**同一张图**的候选链接有序列表，按档位**大到小**
   （原图在前、压缩档殿后）；多数源天然单档即单元素列表，pixiv 等
   有多档的源产多元素；一图只落一档，绝不多档并存（浪费算力与存储）；
-- op_download 按序依次试，首个成功即停，获胜链接记回 content_url（清单只写它）；
+- 下载级按序依次试，首个成功即停，获胜链接记回 content_url（清单只写它）；
 - 源知识（档位推导）留在 adapter，下载算子只认通用有序列表。
 
 本期代表源：wikimedia_zh（官方 API 档）、baidu（爬虫档）。
@@ -25,7 +25,13 @@ mal（角色搜索 HTML）、pixiv（ajax，regular 直取、R18 出口剔除）
 yandex_images（SSR initialState 解析）、deviantart（RSS）；
 fandom 全局搜索端点被 Cloudflare 拦，挂起待拍板。
 2026-08-20 新增国内爬虫三源（旧系统迁移）：huaban_api（api.huaban.com JSON）、
-toutiao（so.toutiao.com 全文本图链抽取）、so360（image.so.com/j JSON）。
+toutiao（so.toutiao.com 全文本图链抽取）、so360（image.so.com j JSON）。
+2026-09-04·八 引擎抽象上移：SearchEngine 协议/注册表/分派归 demiflow.collect.search，
+本模块=检索算子全部：13 个引擎实现（自声明限速/下载闸）+ 域路由策略 +
+SearchStage（路由+扇出+dict 行映射）。
+2026-09-04 新增 searxng：自托管元搜索（data/webgate 模块，127.0.0.1:8080 JSON API），
+聚合 google/bing/ddg 图片检索；检索本机直连、下载走代理的双闸见 net。
+类型沿革：Seed/Item 已拆至 types.py、UA 常量已归位 net（2026-09-04 瑕疵修复）。
 """
 
 from __future__ import annotations
@@ -33,12 +39,22 @@ from __future__ import annotations
 import html as _html
 import json
 import re
-from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
 
-from collect_v2 import infra
+from demiflow.collect import net
+import asyncio
+
+from demiflow.collect import net
+from demiflow.collect.search import (engine_search, is_connect_failure,
+                                     register_engine)
+from demiflow.data.plan import StreamStage
+
+# 身份 UA（Wikimedia robot policy 要求可识别调用方与真实联系方式，
+# 占位邮箱会被拦、真实仓库 URL 实测放行——用户拍板用仓库首页）
+API_UA = ("collect-v2/0.1 (research image collection; "
+          "https://github.com/vincent9299/demiwtg-data) httpx/0.28")
 
 K_SEMANTIC = 5        # 语义检索源（wikimedia/搜索爬虫）K 封顶
 K_STRUCTURED = 15     # 结构化源（inaturalist 等）K 封顶，后续源启用时生效
@@ -51,113 +67,24 @@ def _int_or_none(v) -> Optional[int]:
         return None
 
 
-# UA 策略（实网实测结论）：
-# - 官方 API 档：Wikimedia robot policy 要求可识别调用方与可联系方式，否则 403；
-#   占位邮箱（example.com）会在下载层被拦，真实仓库 URL 实测放行（用户拍板用仓库首页）；
-# - 爬虫档：自报机器人身份会被拦（百度 antiFlag "Forbid spider access"），用常规浏览器 UA。
-API_UA = ("collect-v2/0.1 (research image collection; "
-          "https://github.com/vincent9299/demiwtg) httpx/0.28")
-BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-
-
-# ---------------------------------------------------------------------------
-# 数据结构（算子链统一流转的 Item）
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class Seed:
-    """检索种子：域路由之后的 (实例名, 源) 里的种子部分。
-
-    由 op_seed 产出：中文本体 seed（lang="zh"，query 即实例名）与
-    西文投影 seed（lang="latin"，query 为 LLM 判定的同实体西文名）。
-    """
-    name: str                        # 实例名
-    query: Optional[str] = None      # 真实检索词，缺省即实例名（透传给 sink）
-    lang: str = "zh"                 # 种子语言形态：zh / latin（op_seed 判定）
-
-
-@dataclass
-class Item:
-    """算子链统一流转的数据记录（数据算子流，类似 Ray Dataset 的行）。
-
-    各算子只追加自己的产出字段，不改写上游字段；字段缺失即 None：
-    - op_seed 产：种子（instance/query/lang，见 Seed）；
-    - op_search 产：instance/query/lang/source/rank/content_urls/landing_url/
-      declared_width/declared_height/mime/license/author/native；
-    - op_download 追加：content_url（获胜链接）/data/sha256/ext/
-      actual_width/actual_height/size_bytes；
-    - op_annotate 追加：kb_match/richness/caption/identity/focus/quality
-      （失败则全部为 None）；
-    - op_sink 追加：local_path/fetched_at（落盘成功才有值）。
-    """
-    # 种子（域路由后的实例与真实检索词，query 禁止回落造假）
-    instance: str
-    query: str
-    lang: str = "zh"    # 种子语言形态 zh/latin，sink 写 query_langs 用
-    # 检索产出（声明尺寸常失真，实际尺寸以下载解码为准）
-    source: str = ""
-    rank: int = 0
-    # 同一张图的候选链接，档位大到小（原图在前）；op_download 按序首个成功即停
-    content_urls: list[str] = field(default_factory=list)
-    landing_url: Optional[str] = None
-    declared_width: Optional[int] = None
-    declared_height: Optional[int] = None
-    mime: Optional[str] = None
-    license: Optional[str] = None
-    author: Optional[str] = None
-    native: dict = field(default_factory=dict)   # 源原生元数据原样保留
-    # 下载产出
-    content_url: Optional[str] = None   # 获胜候选（op_download 记回，清单写它）
-    data: Optional[bytes] = None
-    sha256: Optional[str] = None
-    ext: Optional[str] = None
-    actual_width: Optional[int] = None
-    actual_height: Optional[int] = None
-    size_bytes: Optional[int] = None
-    # 标注产出
-    kb_match: Optional[int] = None
-    richness: Optional[int] = None
-    caption: Optional[str] = None
-    identity: Optional[bool] = None
-    focus: Optional[int] = None        # 主体显著度（2026-08-20 拍板转正）
-    quality: Optional[float] = None    # 综合分（op_annotate 派生，非 VLM 产出）
-    # 落盘产出
-    local_path: Optional[str] = None   # blobs/<aa>/<sha>.<ext>，相对 datasets/demiwtg/
-    fetched_at: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
 # adapters
 # ---------------------------------------------------------------------------
 
-class SearchAdapter:
-    """检索源适配器基类：一源一类，只产 Item 不碰主清单。"""
-
-    source: str = ""
-    k_cap: int = K_SEMANTIC
-
-    async def search(
-        self,
-        seed: Seed,
-        k: int,
-        *,
-        client: Optional[httpx.AsyncClient] = None,
-    ) -> list[Item]:
-        raise NotImplementedError
-
-
-class WikimediaZhAdapter(SearchAdapter):
+class WikimediaZhEngine:
     """维基共享资源（中文检索词）：打 commons.wikimedia.org 媒体库本体（旧系统验证过的端点），
     generator=search 只搜文件命名空间。"""
 
-    source = "wikimedia_zh"
+    name = "wikimedia_zh"
     k_cap = K_SEMANTIC
+    limits = net.SourceLimits(rate=2.0, concurrency=2, proxy=True)
+    dl_limits = net.SourceLimits(rate=6.0, concurrency=8, proxy=True)
     _API = "https://commons.wikimedia.org/w/api.php"
 
-    async def search(self, seed, k, *, client=None):
+    async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        query = seed.query or seed.name
         params = {
             "action": "query",
             "format": "json",
@@ -169,14 +96,14 @@ class WikimediaZhAdapter(SearchAdapter):
             "iiprop": "url|size|mime|extmetadata",
             "ppprop": "canonicalurl",
         }
-        resp = await infra.request(
-            self.source, "GET", self._API, client=client,
+        resp = await net.request(
+            self.name, "GET", self._API, client=client,
             params=params, headers={"User-Agent": API_UA},
         )
         pages = (resp.json().get("query") or {}).get("pages") or {}
         # API 返回 dict，index 字段即相关度序；排序后取前 k
         ordered = sorted(pages.values(), key=lambda p: int(p.get("index", 0)))
-        out: list[Item] = []
+        out: list[dict] = []
         for rank, page in enumerate(ordered[:k]):
             info = (page.get("imageinfo") or [{}])[0]
             ext = info.get("extmetadata") or {}
@@ -186,37 +113,32 @@ class WikimediaZhAdapter(SearchAdapter):
                 return v.get("value") if isinstance(v, dict) else None
 
             props = page.get("pageprops") or {}
-            out.append(Item(
-                instance=seed.name,
-                query=query,
-                lang=getattr(seed, "lang", "zh"),
-                source=self.source,
-                rank=rank,
+            out.append({
                 # commons API 直出即原图，单档
-                content_urls=[info["url"]] if info.get("url") else [],
-                landing_url=props.get("canonicalurl") or info.get("descriptionurl"),
-                declared_width=info.get("width"),
-                declared_height=info.get("height"),
-                mime=info.get("mime"),
-                license=_ext("LicenseShortName"),
-                author=_ext("Artist"),
-                native={
+                "tiers": [info["url"]] if info.get("url") else [],
+                "landing": props.get("canonicalurl") or info.get("descriptionurl"),
+                "width": info.get("width"),
+                "height": info.get("height"),
+                "mime": info.get("mime"),
+                "license": _ext("LicenseShortName"),
+                "author": _ext("Artist"),
+                "native": {
                     "page_title": page.get("title"),
                     "page_id": page.get("pageid"),
                     "mediatype": info.get("mediatype"),
                 },
-            ))
+            })
         return out
 
 
-class WikimediaAdapter(WikimediaZhAdapter):
+class WikimediaEngine(WikimediaZhEngine):
     """维基共享资源（拉丁检索词）：与 zh 版同端点同参数——commons 搜索不限语言，
     独立 source 名只为 latin 路由/限速池/统计口径分立（2026-08-20 拍板补注册）。"""
 
-    source = "wikimedia"
+    name = "wikimedia"
 
 
-class BaiduAdapter(SearchAdapter):
+class BaiduEngine:
     """百度图片 acjson 接口（爬虫档）。
 
     纯业务经验来自旧系统（_reference/old_repo/collect/sources/baidu.py）：
@@ -225,29 +147,31 @@ class BaiduAdapter(SearchAdapter):
       回退 thumbURL/hoverURL（middleURL 已是可用最大档，候选单元素）；
     - acjson 的 width/height 是原图尺寸，与 middleURL 实际服务尺寸常不符，
       声明尺寸改从 URL 查询串 ?w=&h= 提取；
-    - 非 JSON 应答按瞬态失败走 infra 重试。
+    - 非 JSON 应答按瞬态失败走 net 重试。
     """
 
-    source = "baidu"
+    name = "baidu"
     k_cap = K_SEMANTIC
+    limits = net.SourceLimits(rate=10.0, concurrency=16, proxy=False)
+    dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=False)
     _API = "https://image.baidu.com/search/acjson"
     _HOME = "https://www.baidu.com/"
     _warmed = False
 
     async def _warmup(self, client: Optional[httpx.AsyncClient]) -> None:
         """预热拿会话 cookie（BAIDUID），失败不阻断，留给正式请求自行暴露。"""
-        if BaiduAdapter._warmed:
+        if BaiduEngine._warmed:
             return
-        http = client or infra.get_client()
+        http = client or net.get_client()
         try:
             await http.get(self._HOME, headers={
-                "User-Agent": BROWSER_UA,
+                "User-Agent": net.BROWSER_UA,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "zh-CN,zh;q=0.9",
             })
         except httpx.HTTPError:
             return
-        BaiduAdapter._warmed = True
+        BaiduEngine._warmed = True
 
     @staticmethod
     def _pick_url(it: dict) -> Optional[str]:
@@ -267,9 +191,8 @@ class BaiduAdapter(SearchAdapter):
             return int(mw.group(1)), int(mh.group(1))
         return None, None
 
-    async def search(self, seed, k, *, client=None):
+    async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        query = seed.query or seed.name
         await self._warmup(client)
         params = {
             "tn": "resultjson_com",
@@ -282,11 +205,11 @@ class BaiduAdapter(SearchAdapter):
             "pn": "0",
             "ie": "utf-8",
         }
-        resp = await infra.request(
-            self.source, "GET", self._API, client=client,
+        resp = await net.request(
+            self.name, "GET", self._API, client=client,
             params=params,
             headers={
-                "User-Agent": BROWSER_UA,
+                "User-Agent": net.BROWSER_UA,
                 "Accept": "*/*",
                 "Accept-Language": "zh-CN,zh;q=0.9",
                 "Referer": "https://image.baidu.com/",
@@ -296,17 +219,17 @@ class BaiduAdapter(SearchAdapter):
         try:
             data = resp.json()
         except (json.JSONDecodeError, ValueError) as exc:
-            # 反爬页/空壳应答：按瞬态失败上抛，由 infra 分类重试语义兜住
-            raise infra.TransientExhaustedError(
+            # 反爬页/空壳应答：按瞬态失败上抛，由 net 分类重试语义兜住
+            raise net.TransientExhaustedError(
                 f"baidu 检索应答非 JSON（疑似反爬页）: {query}"
             ) from exc
         if data.get("antiFlag"):
             # 源明确拦截（如 "Forbid spider access"）：重试无意义，确定性失败认缺
-            raise infra.DeterministicError(
+            raise net.DeterministicError(
                 f"baidu 反爬拦截: {data.get('message')!r} query={query}"
             )
         items = data.get("data") or []
-        out: list[Item] = []
+        out: list[dict] = []
         seen: set[str] = set()
         rank = 0
         for it in items:
@@ -317,27 +240,22 @@ class BaiduAdapter(SearchAdapter):
                 continue  # 无图址/重复的空壳条目，不筛选内容
             seen.add(content_url)
             w, h = self._dims_from_url(content_url)
-            out.append(Item(
-                instance=seed.name,
-                query=query,
-                lang=getattr(seed, "lang", "zh"),
-                source=self.source,
-                rank=rank,
-                content_urls=[content_url],
-                landing_url=it.get("fromURL") or it.get("hoverURL"),
-                declared_width=w,
-                declared_height=h,
-                mime=None,   # 百度不返回 MIME，下载后由解码实测补齐
-                license=None,
-                author=None,
-                native={
+            out.append({
+                "tiers": [content_url],
+                "landing": it.get("fromURL") or it.get("hoverURL"),
+                "width": w,
+                "height": h,
+                "mime": None,   # 百度不返回 MIME，下载后由解码实测补齐
+                "license": None,
+                "author": None,
+                "native": {
                     "from_page_title": it.get("fromPageTitleEnc"),
                     "from_url": it.get("fromURL"),
                     "orig_width": _int_or_none(it.get("width")),
                     "orig_height": _int_or_none(it.get("height")),
                     "size_bytes": _int_or_none(it.get("di")),
                 },
-            ))
+            })
             rank += 1
             if rank >= k:
                 break
@@ -348,48 +266,44 @@ class BaiduAdapter(SearchAdapter):
 # adapters（2026-08-20 新增六源，接口细节均实网探测实证）
 # ---------------------------------------------------------------------------
 
-class AniListAdapter(SearchAdapter):
+class AniListEngine:
     """AniList GraphQL（官方、免鉴权）：只搜 Character（用户拍板，虚拟角色本体）。
 
     单次查询只取最优一条（GraphQL search 语义），多召回靠链层多种子/多源覆盖。
     """
 
-    source = "anilist"
+    name = "anilist"
     k_cap = K_STRUCTURED
+    limits = net.SourceLimits(rate=2.0, concurrency=2, proxy=True)
+    dl_limits = net.SourceLimits(rate=6.0, concurrency=8, proxy=True)
     _API = "https://graphql.anilist.co"
     _QUERY = ("query($q:String){Character(search:$q){"
               "id name{full} image{large} siteUrl}}")
 
-    async def search(self, seed, k, *, client=None):
-        query = seed.query or seed.name
-        resp = await infra.request(
-            self.source, "POST", self._API, client=client,
+    async def search(self, query, k, *, lang="zh", client=None):
+        resp = await net.request(
+            self.name, "POST", self._API, client=client,
             json={"query": self._QUERY, "variables": {"q": query}},
             headers={"User-Agent": API_UA, "Content-Type": "application/json"},
         )
         char = (resp.json().get("data") or {}).get("Character")
         if not char or not (char.get("image") or {}).get("large"):
             return []   # 无命中 = 认缺
-        return [Item(
-            instance=seed.name,
-            query=query,
-            lang=getattr(seed, "lang", "zh"),
-            source=self.source,
-            rank=0,
+        return [{
             # AniList image.large 已是 API 提供的最大档，单档
-            content_urls=[char["image"]["large"]],
-            landing_url=char.get("siteUrl"),
-            declared_width=None,
-            declared_height=None,
-            mime=None,
-            license=None,
-            author=None,
-            native={"character_id": char.get("id"),
-                    "character_name": (char.get("name") or {}).get("full")},
-        )]
+            "tiers": [char["image"]["large"]],
+            "landing": char.get("siteUrl"),
+            "width": None,
+            "height": None,
+            "mime": None,
+            "license": None,
+            "author": None,
+            "native": {"character_id": char.get("id"),
+                       "character_name": (char.get("name") or {}).get("full")},
+        }]
 
 
-class MalAdapter(SearchAdapter):
+class MalEngine:
     """MyAnimeList 角色搜索 HTML 抓取（官方 API 需 client_id，不用）。
 
     character.php?q= 列表页结构（实网实测）：每行是绝对 URL 角色链接
@@ -397,24 +311,25 @@ class MalAdapter(SearchAdapter):
     lazyload img（data-src 为 /r/42x62/ 规格缩略图，去规格前缀即 CDN 原图）。
     """
 
-    source = "mal"
+    name = "mal"
     k_cap = K_SEMANTIC
+    limits = net.SourceLimits(rate=10.0, concurrency=16, proxy=False)
+    dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=False)
     _SEARCH = "https://myanimelist.net/character.php"
     _RESIZED_RE = re.compile(r"/r/\d+x\d+/")
     _ROW_RE = re.compile(
         r'href="https://myanimelist\.net/character/(\d+)/([^"]+)".*?'
         r'data-src="([^"]+)"', re.S)
 
-    async def search(self, seed, k, *, client=None):
+    async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        query = seed.query or seed.name
-        resp = await infra.request(
-            self.source, "GET", self._SEARCH, client=client,
+        resp = await net.request(
+            self.name, "GET", self._SEARCH, client=client,
             params={"q": query},
-            headers={"User-Agent": BROWSER_UA,
+            headers={"User-Agent": net.BROWSER_UA,
                      "Accept-Language": "en"},
         )
-        out: list[Item] = []
+        out: list[dict] = []
         seen: set[str] = set()
         for m in self._ROW_RE.finditer(resp.text):
             cid, cname, img = m.group(1), m.group(2), m.group(3)
@@ -422,29 +337,24 @@ class MalAdapter(SearchAdapter):
             if content_url in seen:
                 continue
             seen.add(content_url)
-            out.append(Item(
-                instance=seed.name,
-                query=query,
-                lang=getattr(seed, "lang", "zh"),
-                source=self.source,
-                rank=len(out),
+            out.append({
                 # 去 /r/规格前缀后已是 CDN 原图，单档
-                content_urls=[content_url],
-                landing_url=f"https://myanimelist.net/character/{cid}/{cname}",
-                declared_width=None,
-                declared_height=None,
-                mime=None,
-                license=None,
-                author=None,
-                native={"character_id": int(cid),
+                "tiers": [content_url],
+                "landing": f"https://myanimelist.net/character/{cid}/{cname}",
+                "width": None,
+                "height": None,
+                "mime": None,
+                "license": None,
+                "author": None,
+                "native": {"character_id": int(cid),
                         "character_name": cname.replace("_", " ")},
-            ))
+            })
             if len(out) >= k:
                 break
         return out
 
 
-class PixivAdapter(SearchAdapter):
+class PixivEngine:
     """Pixiv 搜索 ajax 接口（无需登录，必须带站内 Referer）。
 
     候选档位（2026-08-21 拍板，数据用途定案训练数据，原图优先）：
@@ -455,8 +365,10 @@ class PixivAdapter(SearchAdapter):
     xRestrict>0 的 R18 作品在检索出口剔除（内容政策，非语义过滤）。
     """
 
-    source = "pixiv"
+    name = "pixiv"
     k_cap = K_STRUCTURED
+    limits = net.SourceLimits(rate=10.0, concurrency=16, proxy=True)
+    dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=True)
     _API = "https://www.pixiv.net/ajax/search/artworks/"
 
     @staticmethod
@@ -477,77 +389,72 @@ class PixivAdapter(SearchAdapter):
         custom-thumb/ 路径（AI 生成作，实网实测）无 img-original 对应档，
         推导规则不适用，custom1200 即该路径最大档，单元素候选。
         ugoira（illustType=2）原件是 zip 无静态原图，只给 master1200 首帧。"""
-        master = PixivAdapter._regular_url(thumb)
+        master = PixivEngine._regular_url(thumb)
         if _int_or_none(illust_type) == 2 or "/custom-thumb/" in master:
             return [master]
         orig = re.sub(r"/img-master/", "/img-original/", master)
         orig = re.sub(r"_master1200\.\w+$", "", orig)
         return [orig + ".jpg", orig + ".png", master]
 
-    async def search(self, seed, k, *, client=None):
+    async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        query = seed.query or seed.name
-        resp = await infra.request(
-            self.source, "GET", self._API + query, client=client,
+        resp = await net.request(
+            self.name, "GET", self._API + query, client=client,
             params={"lang": "en"},
-            headers={"User-Agent": BROWSER_UA,
+            headers={"User-Agent": net.BROWSER_UA,
                      "Referer": "https://www.pixiv.net/",
                      "Accept": "application/json"},
         )
         data = resp.json()
         if data.get("error"):
-            raise infra.TransientExhaustedError(
+            raise net.TransientExhaustedError(
                 f"pixiv 检索应答 error=true: {data.get('message')!r}")
         arts = ((data.get("body") or {}).get("illustManga") or {}).get("data") or []
-        out: list[Item] = []
+        out: list[dict] = []
         for a in arts:
             if a.get("xRestrict", 0) > 0:   # R18 剔除（用户拍板）
                 continue
             url = a.get("url")
             if not url:
                 continue
-            out.append(Item(
-                instance=seed.name,
-                query=query,
-                lang=getattr(seed, "lang", "zh"),
-                source=self.source,
-                rank=len(out),
-                content_urls=self._candidate_urls(url, a.get("illustType")),
-                landing_url=f"https://www.pixiv.net/artworks/{a.get('id')}",
-                declared_width=_int_or_none(a.get("width")),
-                declared_height=_int_or_none(a.get("height")),
-                mime=None,
-                license=None,
-                author=a.get("userName"),
-                native={"artwork_id": a.get("id"),
+            out.append({
+                "tiers": self._candidate_urls(url, a.get("illustType")),
+                "landing": f"https://www.pixiv.net/artworks/{a.get('id')}",
+                "width": _int_or_none(a.get("width")),
+                "height": _int_or_none(a.get("height")),
+                "mime": None,
+                "license": None,
+                "author": a.get("userName"),
+                "native": {"artwork_id": a.get("id"),
                         "title": a.get("title"),
                         "illust_type": a.get("illustType"),
                         "user_id": a.get("userId")},
-            ))
+            })
             if len(out) >= k:
                 break
         return out
 
 
-class BingImagesAdapter(SearchAdapter):
+class BingImagesEngine:
     """Bing 图片 async 接口 HTML：每个结果块的 m 属性是 JSON
     （murl=原图直链/mw/mh 尺寸/purl=来源页），turl 缩略图不用。"""
 
-    source = "bing_images"
+    name = "bing_images"
     k_cap = K_SEMANTIC
+    limits = net.SourceLimits(rate=10.0, concurrency=16, proxy=False)
+    dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=False)
     _API = "https://www.bing.com/images/async"
     _M_RE = re.compile(r'm="({.*?})"\s', re.S)
 
-    async def search(self, seed, k, *, client=None):
+    async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        query = seed.query or seed.name
-        resp = await infra.request(
-            self.source, "GET", self._API, client=client,
+        resp = await net.request(
+            self.name, "GET", self._API, client=client,
             params={"q": query, "first": "0", "count": "35", "mmasync": "1"},
-            headers={"User-Agent": BROWSER_UA,
+            headers={"User-Agent": net.BROWSER_UA,
                      "Accept-Language": "en"},
         )
-        out: list[Item] = []
+        out: list[dict] = []
         seen: set[str] = set()
         for m in self._M_RE.finditer(resp.text):
             try:
@@ -558,93 +465,85 @@ class BingImagesAdapter(SearchAdapter):
             if not url.lower().startswith("http") or url in seen:
                 continue
             seen.add(url)
-            out.append(Item(
-                instance=seed.name,
-                query=query,
-                lang=getattr(seed, "lang", "zh"),
-                source=self.source,
-                rank=len(out),
+            out.append({
                 # murl 即源站原图直链，单档
-                content_urls=[url],
-                landing_url=meta.get("purl"),
-                declared_width=_int_or_none(meta.get("mw")),
-                declared_height=_int_or_none(meta.get("mh")),
-                mime=None,
-                license=None,
-                author=None,
-                native={"title": meta.get("t"), "desc": meta.get("desc")},
-            ))
+                "tiers": [url],
+                "landing": meta.get("purl"),
+                "width": _int_or_none(meta.get("mw")),
+                "height": _int_or_none(meta.get("mh")),
+                "mime": None,
+                "license": None,
+                "author": None,
+                "native": {"title": meta.get("t"), "desc": meta.get("desc")},
+            })
             if len(out) >= k:
                 break
         return out
 
 
-class YandexImagesAdapter(SearchAdapter):
+class YandexImagesEngine:
     """Yandex 图片：SSR 页面内嵌 HTML 实体转义的 initialState JSON，
     反转义后提取结构化条目 {url,w,h,fileSizeInBytes}（实网 185 条实证）。
     条目无来源页，landing_url 认缺留 None。"""
 
-    source = "yandex_images"
+    name = "yandex_images"
     k_cap = K_SEMANTIC
+    limits = net.SourceLimits(rate=10.0, concurrency=16, proxy=False)
+    dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=False)
     _SEARCH = "https://yandex.com/images/search"
     _ENTRY_RE = re.compile(
         r'\{"url":"(https://[^"]+)","fileSizeInBytes":(\d+),'
         r'"w":(\d+),"h":(\d+)\}')
 
-    async def search(self, seed, k, *, client=None):
+    async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        query = seed.query or seed.name
-        resp = await infra.request(
-            self.source, "GET", self._SEARCH, client=client,
+        resp = await net.request(
+            self.name, "GET", self._SEARCH, client=client,
             params={"text": query},
-            headers={"User-Agent": BROWSER_UA, "Accept-Language": "en"},
+            headers={"User-Agent": net.BROWSER_UA, "Accept-Language": "en"},
         )
         unescaped = _html.unescape(resp.text)
-        out: list[Item] = []
+        out: list[dict] = []
         seen: set[str] = set()
         for m in self._ENTRY_RE.finditer(unescaped):
             url = m.group(1)
             if url in seen:
                 continue
             seen.add(url)
-            out.append(Item(
-                instance=seed.name,
-                query=query,
-                lang=getattr(seed, "lang", "zh"),
-                source=self.source,
-                rank=len(out),
+            out.append({
                 # SSR 内嵌 url 即源站原图，单档
-                content_urls=[url],
-                landing_url=None,
-                declared_width=int(m.group(3)),
-                declared_height=int(m.group(4)),
-                mime=None,
-                license=None,
-                author=None,
-                native={"file_size": int(m.group(2))},
-            ))
+                "tiers": [url],
+                "landing": None,
+                "width": int(m.group(3)),
+                "height": int(m.group(4)),
+                "mime": None,
+                "license": None,
+                "author": None,
+                "native": {"file_size": int(m.group(2))},
+            })
             if len(out) >= k:
                 break
         return out
 
 
-class DeviantArtAdapter(SearchAdapter):
+class DeviantArtEngine:
     """DeviantArt RSS（backend.deviantart.com，官方公开通道免 OAuth）：
     media:content 为 wixmp CDN 图直链，media:credit 作者名。"""
 
-    source = "deviantart"
+    name = "deviantart"
     k_cap = K_STRUCTURED
+    limits = net.SourceLimits(rate=2.0, concurrency=2, proxy=True)
+    dl_limits = net.SourceLimits(rate=6.0, concurrency=8, proxy=True)
     _RSS = "https://backend.deviantart.com/rss.xml"
 
-    async def search(self, seed, k, *, client=None):
+    async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        query = seed.query or seed.name
-        resp = await infra.request(
-            self.source, "GET", self._RSS, client=client,
+        resp = await net.request(
+            self.name, "GET", self._RSS, client=client,
             params={"type": "deviation", "q": f"boost:popular {query}"},
             headers={"User-Agent": API_UA},
         )
-        out: list[Item] = []
+        out: list[dict] = []
         seen: set[str] = set()
         for block in re.finditer(r"<item>(.*?)</item>", resp.text, re.S):
             item_xml = block.group(1)
@@ -660,22 +559,17 @@ class DeviantArtAdapter(SearchAdapter):
             if not url or url in seen:
                 continue
             seen.add(url)
-            out.append(Item(
-                instance=seed.name,
-                query=query,
-                lang=getattr(seed, "lang", "zh"),
-                source=self.source,
-                rank=len(out),
+            out.append({
                 # RSS media:content 给的就是 wixmp 全尺寸档，单档
-                content_urls=[url],
-                landing_url=_tag("link"),
-                declared_width=int(mc.group(3)) if mc else None,
-                declared_height=int(mc.group(2)) if mc else None,
-                mime=None,
-                license=None,
-                author=_tag("media:credit"),
-                native={"title": _tag("title")},
-            ))
+                "tiers": [url],
+                "landing": _tag("link"),
+                "width": int(mc.group(3)) if mc else None,
+                "height": int(mc.group(2)) if mc else None,
+                "mime": None,
+                "license": None,
+                "author": _tag("media:credit"),
+                "native": {"title": _tag("title")},
+            })
             if len(out) >= k:
                 break
         return out
@@ -720,21 +614,22 @@ def _filter_img_urls(urls: list[str], host_hint: tuple[str, ...], *,
     return out
 
 
-class HuabanApiAdapter(SearchAdapter):
+class HuabanApiEngine:
     """花瓣 api.huaban.com/search JSON 接口（旧系统实证通道；HTML 页 JS 渲染拦截，不迁）。
     pins[].file.key 拼 hbimg.huaban.com 直链，file 内宽高即原图尺寸。"""
 
-    source = "huaban_api"
+    name = "huaban_api"
     k_cap = K_SEMANTIC
+    limits = net.SourceLimits(rate=10.0, concurrency=16, proxy=False)
+    dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=False)
     _API = "https://api.huaban.com/search"
 
-    async def search(self, seed, k, *, client=None):
+    async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        query = seed.query or seed.name
-        resp = await infra.request(
-            self.source, "GET", self._API, client=client,
+        resp = await net.request(
+            self.name, "GET", self._API, client=client,
             params={"q": query, "limit": "20"},
-            headers={"User-Agent": BROWSER_UA,
+            headers={"User-Agent": net.BROWSER_UA,
                      "Accept": "application/json",
                      "Referer": "https://huaban.com/",
                      "Accept-Language": "zh-CN,zh;q=0.9"},
@@ -742,11 +637,11 @@ class HuabanApiAdapter(SearchAdapter):
         try:
             data = resp.json()
         except (json.JSONDecodeError, ValueError) as exc:
-            raise infra.TransientExhaustedError(
+            raise net.TransientExhaustedError(
                 f"huaban_api 检索应答非 JSON（疑似反爬页）: {query}"
             ) from exc
         pins = data.get("pins") or data.get("data") or []
-        out: list[Item] = []
+        out: list[dict] = []
         seen: set[str] = set()
         for p in pins:
             f = p.get("file") or {}
@@ -757,88 +652,80 @@ class HuabanApiAdapter(SearchAdapter):
             if content_url in seen:
                 continue
             seen.add(content_url)
-            out.append(Item(
-                instance=seed.name,
-                query=query,
-                lang=getattr(seed, "lang", "zh"),
-                source=self.source,
-                rank=len(out),
+            out.append({
                 # hbimg 直链即原图（file 内宽高即原图尺寸），单档
-                content_urls=[content_url],
-                landing_url=None,
-                declared_width=_int_or_none(f.get("width")),
-                declared_height=_int_or_none(f.get("height")),
-                mime=None,
-                license=None,
-                author=None,
-                native={"pin_id": p.get("pin_id"),
+                "tiers": [content_url],
+                "landing": None,
+                "width": _int_or_none(f.get("width")),
+                "height": _int_or_none(f.get("height")),
+                "mime": None,
+                "license": None,
+                "author": None,
+                "native": {"pin_id": p.get("pin_id"),
                         "board_title": (p.get("board") or {}).get("title")},
-            ))
+            })
             if len(out) >= k:
                 break
         return out
 
 
-class ToutiaoAdapter(SearchAdapter):
+class ToutiaoEngine:
     """今日头条搜索（so.toutiao.com）全文本图链抽取（含内联 JSON，比仅扫 <img> 更全）。
     toutiaoimg.com 为签名图床普遍 403 防盗链，出口剔除；仅保留 byteimg/douyinpic CDN。"""
 
-    source = "toutiao"
+    name = "toutiao"
     k_cap = K_SEMANTIC
+    limits = net.SourceLimits(rate=10.0, concurrency=16, proxy=False)
+    dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=False)
     _SEARCH = "https://so.toutiao.com/search"
     _URL_RE = re.compile(r"https?://[^\s\"'<>]+\.(?:jpg|jpeg|png|webp)", re.I)
     _HOST_HINT = ("byteimg.com", "douyinpic.com")
 
-    async def search(self, seed, k, *, client=None):
+    async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        query = seed.query or seed.name
-        resp = await infra.request(
-            self.source, "GET", self._SEARCH, client=client,
+        resp = await net.request(
+            self.name, "GET", self._SEARCH, client=client,
             params={"keyword": query, "source": "input",
                     "traffic_source": "web_search_tab"},
-            headers={"User-Agent": BROWSER_UA,
+            headers={"User-Agent": net.BROWSER_UA,
                      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                      "Accept-Language": "zh-CN,zh;q=0.9"},
         )
         urls = self._URL_RE.findall(resp.text)
-        out: list[Item] = []
+        out: list[dict] = []
         for u in _filter_img_urls(urls, self._HOST_HINT,
                                   exclude=("toutiaoimg.com",)):
-            out.append(Item(
-                instance=seed.name,
-                query=query,
-                lang=getattr(seed, "lang", "zh"),
-                source=self.source,
-                rank=len(out),
-                content_urls=[u],
-                landing_url=None,
-                declared_width=None,
-                declared_height=None,
-                mime=None,
-                license=None,
-                author=None,
-                native={},
-            ))
+            out.append({
+                "tiers": [u],
+                "landing": None,
+                "width": None,
+                "height": None,
+                "mime": None,
+                "license": None,
+                "author": None,
+                "native": {},
+            })
             if len(out) >= k:
                 break
         return out
 
 
-class So360Adapter(SearchAdapter):
+class So360Engine:
     """360 图片 image.so.com/j JSON 接口：多档候选 imgurl（原图）> middle > thumb
     （档位大到小，下载端按序首个成功即停）；url 字段是图所在网页（landing_url）。"""
 
-    source = "so360"
+    name = "so360"
     k_cap = K_SEMANTIC
+    limits = net.SourceLimits(rate=10.0, concurrency=16, proxy=False)
+    dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=False)
     _API = "https://image.so.com/j"
 
-    async def search(self, seed, k, *, client=None):
+    async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        query = seed.query or seed.name
-        resp = await infra.request(
-            self.source, "GET", self._API, client=client,
+        resp = await net.request(
+            self.name, "GET", self._API, client=client,
             params={"q": query, "sn": "0", "pn": "30", "src": "tab_www"},
-            headers={"User-Agent": BROWSER_UA,
+            headers={"User-Agent": net.BROWSER_UA,
                      "Accept": "application/json",
                      "Referer": "https://image.so.com/",
                      "Accept-Language": "zh-CN,zh;q=0.9"},
@@ -846,11 +733,11 @@ class So360Adapter(SearchAdapter):
         try:
             data = resp.json()
         except (json.JSONDecodeError, ValueError) as exc:
-            raise infra.TransientExhaustedError(
+            raise net.TransientExhaustedError(
                 f"so360 检索应答非 JSON（疑似反爬页）: {query}"
             ) from exc
         lst = data.get("list") or [] if isinstance(data, dict) else []
-        out: list[Item] = []
+        out: list[dict] = []
         seen: set[str] = set()
         for it in lst:
             if not isinstance(it, dict):
@@ -864,60 +751,170 @@ class So360Adapter(SearchAdapter):
                     urls.append(u)
             if not urls:
                 continue
-            out.append(Item(
-                instance=seed.name,
-                query=query,
-                lang=getattr(seed, "lang", "zh"),
-                source=self.source,
-                rank=len(out),
-                content_urls=urls,
-                landing_url=it.get("url") or None,
-                declared_width=_int_or_none(it.get("width")),
-                declared_height=_int_or_none(it.get("height")),
-                mime=None,
-                license=None,
-                author=None,
-                native={"title": it.get("title")},
-            ))
+            out.append({
+                "tiers": urls,
+                "landing": it.get("url") or None,
+                "width": _int_or_none(it.get("width")),
+                "height": _int_or_none(it.get("height")),
+                "mime": None,
+                "license": None,
+                "author": None,
+                "native": {"title": it.get("title")},
+            })
+            if len(out) >= k:
+                break
+        return out
+
+
+class SearxngEngine:
+    """SearXNG 元搜索（2026-09-04 接入）：自托管本机实例聚合 google/bing/ddg 图片检索。
+
+    - 端点：data/webgate 模块的 /search?format=json（settings.yml 显式开 JSON，
+      默认关闭；127.0.0.1:8080 仅本机监听）；
+    - 档位契约：content_urls = [img_src（原图直链）, thumbnail_src（缩图兜底）]，
+      落进下载档位轮转——元搜索死链/防盗链率高，缩图是实测可得的兜底档；
+    - native.engine 保留来源引擎（google/bing_images/duckduckgo 等）：
+      产出质量按引擎观测，劣质引擎在 SearXNG settings 侧直接关；
+    - language 对位：zh 种子传 zh-CN、latin 种子传 en（SearXNG 转发给上游引擎）。
+    """
+
+    name = "searxng"
+    k_cap = K_SEMANTIC
+    limits = net.SourceLimits(rate=10.0, concurrency=16)
+    dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=True)
+    _API = "http://127.0.0.1:8080/search"
+
+    async def search(self, query, k, *, lang="zh", client=None):
+        k = min(k, self.k_cap)
+        params = {
+            "q": query,
+            "categories": "images",
+            "format": "json",
+            "language": "zh-CN" if lang == "zh" else "en",
+            "safesearch": 1,
+        }
+        try:
+            resp = await net.request(self.name, "GET", self._API,
+                                     params=params, client=client)
+        except (net.DeterministicError, net.TransientExhaustedError) as exc:
+            # 网关没起是配置错误不是源故障：fail-fast 终止并给出口，
+            # 不进认缺（否则全部 searxng 召回无声消失）
+            if is_connect_failure(exc):
+                raise RuntimeError(
+                    "SearXNG 网关不可达（127.0.0.1:8080）："
+                    "先启动 bash data/webgate/start.sh") from exc
+            raise
+        out: list[dict] = []
+        seen: set[str] = set()
+        for res in resp.json().get("results", []):
+            img = res.get("img_src")
+            if not img:
+                continue
+            key = str(img)
+            if key in seen:
+                continue
+            seen.add(key)
+            tiers = [u for u in (img, res.get("thumbnail_src")) if u]
+            resolution = str(res.get("resolution") or "")
+            w, _, h = resolution.partition("x")
+            out.append({
+                "tiers": tiers,
+                "landing": res.get("url") or None,
+                "width": _int_or_none(w) if resolution else None,
+                "height": _int_or_none(h) if resolution else None,
+                "mime": None,
+                "license": None,
+                "author": None,
+                "native": {"engine": res.get("engine"),
+                        "title": res.get("title")},
+            })
             if len(out) >= k:
                 break
         return out
 
 
 # ---------------------------------------------------------------------------
-# 注册表与分派
+# 引擎与限速注册（自声明式：import 期完成，检索闸+下载闸随引擎走）
 # ---------------------------------------------------------------------------
 
-_ADAPTERS: dict[str, SearchAdapter] = {}
+_ENGINES = (
+    WikimediaZhEngine(), WikimediaEngine(), BaiduEngine(), AniListEngine(),
+    MalEngine(), PixivEngine(), BingImagesEngine(), YandexImagesEngine(),
+    DeviantArtEngine(), HuabanApiEngine(), ToutiaoEngine(), So360Engine(),
+    SearxngEngine(),
+)
+for _e in _ENGINES:
+    register_engine(_e)
+    net.register_limits({_e.name: _e.limits, f"dl:{_e.name}": _e.dl_limits})
 
 
-def register(adapter: SearchAdapter) -> None:
-    _ADAPTERS[adapter.source] = adapter
+# ---------------------------------------------------------------------------
+# 域路由表（原 getsource.py 迁入：路由是检索算子的内部策略，非独立概念）
+# lang → 源列表（顺序即投递顺序，无权重语义）；未登记 lang 认缺不回落。
+#
+# 沿革：2026-08-20 虚拟角色向新源对所有 seed 全量投递拍板；2026-08-22
+# 代理复通还原代理源、anilist/mal 剔除（专场已爬）、pixiv/deviantart 移入
+# latin-only 恢复语言对位；国内爬虫三源只打 zh；2026-09-04 searxng 双行
+# 挂载（language 参数对位 zh-CN/en）。
+_CHAR_SOURCES = ["bing_images", "yandex_images"]
+_LATIN_ONLY_SOURCES = ["pixiv"]
+_CN_CRAWLER_SOURCES = ["huaban_api", "toutiao", "so360"]
+_META_SOURCES = ["searxng"]
+
+ROUTE_TABLE: dict = {
+    "zh": ["baidu", "wikimedia_zh"] + _CN_CRAWLER_SOURCES + _CHAR_SOURCES
+          + _META_SOURCES,
+    "latin": ["wikimedia"] + _CHAR_SOURCES + _LATIN_ONLY_SOURCES + _META_SOURCES,
+}
 
 
-register(WikimediaZhAdapter())
-register(WikimediaAdapter())
-register(BaiduAdapter())
-register(AniListAdapter())
-register(MalAdapter())
-register(PixivAdapter())
-register(BingImagesAdapter())
-register(YandexImagesAdapter())
-register(DeviantArtAdapter())
-register(HuabanApiAdapter())
-register(ToutiaoAdapter())
-register(So360Adapter())
+def _sources_for(seed: dict) -> list:
+    return ROUTE_TABLE.get(seed.get("lang", "zh"), [])
 
 
-async def search(
-    seed: Seed,
-    source: str,
-    k: int = K_SEMANTIC,
-    *,
-    client: Optional[httpx.AsyncClient] = None,
-) -> list[Item]:
-    """对 source 检索 seed，返回有界有序 Item 列表（可能为空 = 认缺）。"""
-    adapter = _ADAPTERS.get(source)
-    if adapter is None:
-        raise ValueError(f"源 {source!r} 未注册 adapter")
-    return await adapter.search(seed, k, client=client)
+class SearchStage(StreamStage):
+    """检索算子（demiflow 规范）：种子行 → 候选行集。
+
+    内部策略：域路由（ROUTE_TABLE）+ 多引擎并发扇出（各引擎自带限速闸
+    全局节流）+ dict 行映射。top_n 为每源固定切片（无补位）；单源白名单
+    异常认缺不断链，非白名单异常（如网关 fail-fast）终止整链。
+
+    行契约：
+    - 读键：name、query、lang
+    - 产行：{**种子键, source, tiers[档位大到小], landing, width, height,
+            mime, license, author, native}
+    """
+    label = "search"
+    concurrency = 16
+    queue_depth = 96
+    catch = (net.InfraError, httpx.HTTPError)   # 检索级认缺白名单
+
+    def __init__(self, top_n: int = 2, k: int = K_SEMANTIC):
+        self.top_n, self.k = top_n, k
+
+    async def __call__(self, seed: dict):
+        sources = _sources_for(seed)
+        if not sources:
+            return None
+        query = seed.get("query") or seed["name"]
+        results = await asyncio.gather(*(
+            engine_search(s, query, self.k, lang=seed.get("lang", "zh"))
+            for s in sources), return_exceptions=True)
+        out: list[dict] = []
+        for source, rows in zip(sources, results):
+            if isinstance(rows, BaseException):
+                if isinstance(rows, self.catch):
+                    continue            # 单源认缺
+                raise rows              # 真异常（含网关 fail-fast）
+            for r in rows[:self.top_n]:  # 每源固定切片无补位
+                out.append({**seed,
+                            "source": source,
+                            "tiers": r.get("tiers") or [],
+                            "landing": r.get("landing"),
+                            "width": r.get("width"),
+                            "height": r.get("height"),
+                            "mime": r.get("mime"),
+                            "license": r.get("license"),
+                            "author": r.get("author"),
+                            "native": r.get("native") or {}})
+        return out or None

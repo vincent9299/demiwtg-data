@@ -14,12 +14,12 @@ demiwtg/
 ├── datasets/                   # 【纯数据】数据集根目录（一数据集一目录；原 data/datasets/，2026-08-24 升为顶层）
 │   ├── demiwtg/                #   自建数据集 demiwtg（硬约束见第 2 节）
 │   │   ├── blobs/              #     图片原始字节区（内容寻址，不可变，不入 git）
-│   │   └── meta/               #     真相区：images.jsonl/metadata.jsonl 与 taxonomy 三件套 + 英文平行两件套 taxonomy_en.json/instances_en.json（三件套与英文两件套入 git）
+│   │   └── meta/               #     真相区：metadata.jsonl（唯一权威主清单）与 taxonomy 三件套 + 英文平行两件套 taxonomy_en.json/instances_en.json（三件套与英文两件套入 git）
 │   └── .../                    #   开源数据集落盘区（danbooru2024/coco2017 等，不入 git）
-├── data/                       # 【代码】数据构建代码（原仓库根五模块中的三个，2026-08-24 收编入 data/）
-│   ├── collect_v2/             #   采集（检索→下载→落盘/打标链路编排）
-│   ├── taxonomy/               #   体系维护与富化（mount_map / gen_taxonomy_kb / gen_instance_kb / audit_nodes / upgrade_v31）
-│   └── curation/               #   数据策展（分析 notebook：dataset_analysis.ipynb 已从 IDE 快照恢复归位，见架构决策 2026-08-24）
+├── data_pipeline/              # 【代码】自动化生产管线（原 data/collect_v2，2026-09-04·十二 上升顶层）
+│   ├── operators/              #   算子目录（一算子一文件：seed/search/download/annotate，dict 行模型）
+│   ├── smokes/                 #   冒烟目录（8 件：按算子分层 mock 验证 + 口径金测）
+│   └── webgate/                #   SearXNG 服务部署件（searxng 引擎的数据面，脚本+模板入库重物不入）
 ├── state/                      # 运行时状态，按模块归属分子目录（不入 git）
 │   ├── collect/                #   datasets/（下载过程脚本，只读归档）+ v1 遗留运行时状态（死信/health/runs，只读归档）
 │   ├── dataset_index/          #   COCO 标注缓存
@@ -32,7 +32,7 @@ demiwtg/
 ```
 
 - `datasets/` 下**只是数据存储**：任何代码、页面、生成产物都不许放进去。
-- 代码只允许放在 `data/` 下三模块（`collect_v2/`、`taxonomy/`、`curation/`）与仓库根 `viewer/`、`benchmark/`。
+- 代码只允许放在 `data_pipeline/`（`operators/`、`webgate/` 子目录）与仓库根 `viewer/`、`benchmark/`。
 - 仓库顶层禁止新增散落的脚本或数据目录（`datasets/`、`data/`、`state/`、`logs/` 是明确登记过的例外；`bagel/` 为登记的独立子项目例外，内部布局自治，不受本仓模块/数据边界规则约束；`modelhub/` 为登记的独立子项目例外（LLM 网关 + 静态代理），内部布局自治，同不受约束；`.venv/` 为登记的公共环境例外，只放环境不放代码）。
 - 文档只有两份：`AGENTS.md`（约束）与 `README.md`（指针）。历史过程文档（docs/、子目录 README）已删除，**不再恢复**——过程记录看 git 历史。
 
@@ -75,7 +75,7 @@ instance = {
 - **`name` 全局唯一是硬约束**：同一实体的知识字段只维护一份；多处挂载表现为多个树节点的 instances 名单同时含该名字（原 taxonomy_paths 字段已废除：它是树的影子，不进实例表）。
 - 没有 `type` 字段：有没有子树看 `children`，挂不挂实例看 `instances`。
 - **英文平行两件套**（架构决策 2026-08-24）：`taxonomy_en.json` / `instances_en.json` 与中文两件套同居 meta/、schema 完全同构（英文树根也是 demiwtg 直挂 29 域）；两套数据完全独立，中英实例名空间零交集，英文实例当前无图片关联（不打标、不映射中文富知识）。
-- 图片打标只存**实例名**（实体标签，不含路径）——体系演化（改路径/重生成树）不需要迁移图数据。看图入口（viewer 的 build/imgs.js）由 meta/images.jsonl 的 instances 字段现场聚合、相对路径指到 blobs 原图（相对 viewer/ 的 ../datasets/demiwtg/blobs/...），不再建软链树。
+- 图片打标只存**实例名**（实体标签，不含路径）——体系演化（改路径/重生成树）不需要迁移图数据。看图入口（viewer 的 build/imgs.js）由 meta/metadata.jsonl 的 instances 字段现场聚合、相对路径指到 blobs 原图（相对 viewer/ 的 ../datasets/demiwtg/blobs/...），不再建软链树。
 - 数据字段定义即契约，改字段 = 改本节 + 同步全部消费代码。
 
 ## 2. datasets/demiwtg/ 硬约束（定死，逐条执行）
@@ -97,8 +97,8 @@ datasets/demiwtg/blobs/<aa>/<sha256>.<ext>   # aa = sha256 前两位；sha256 = 
 
 | 文件 | 角色 |
 |---|---|
-| `images.jsonl` | 唯一权威主清单：一张图一行（sha256 + 全部字段），按 sha256 增量 upsert；instances 字段只存实例名，实例名↔图关系由它单点承载 |
-| `metadata.jsonl` | collect_v2 专属采集清单（2026-08-20 拍板） |
+| `images.jsonl` | 已退役删除（2026-09-04·十三 迁移收官，git 历史可找回）：唯一权威主清单职责由 metadata.jsonl 承接 |
+| `metadata.jsonl` | 唯一权威主清单（2026-09-04·十三 起 images.jsonl 退役后升格）：一张图一行（sha256 + 采集/标注字段），(sha256, instance) 幂等追加；instances 字段只存实例名，实例名↔图关系由它单点承载 |
 | `taxonomy.json` | 标签体系树（展示视角，权威源，入 git） |
 | `instances.json` | 实例资产库（实体权威源，入 git） |
 | `alias_western.json` | op_seed 西文别名词表（LLM 判定增量落盘，入 git） |
@@ -110,7 +110,7 @@ datasets/demiwtg/blobs/<aa>/<sha256>.<ext>   # aa = sha256 前两位；sha256 = 
 
 - ❌ 审计日志（只写不读的账本一律不建；先有读取代码才允许写入）
 - ❌ 备份文件（*.bak-*、*.bak-sync 之类）
-- ❌ 派生索引（LanceDB、实例名→图反向索引等；需要时由消费者从 images.jsonl 现场聚合）
+- ❌ 派生索引（LanceDB、实例名→图反向索引等；需要时由消费者从 metadata.jsonl 现场聚合）
 - ❌ 运行时状态（死信队列 sqlite、健康账本、done flags、COCO 缓存）
 
 **判据（新增任何文件前先回答）：**
@@ -125,7 +125,7 @@ datasets/demiwtg/blobs/<aa>/<sha256>.<ext>   # aa = sha256 前两位；sha256 = 
 
 ### 2.4 一致性规则
 
-- `images.jsonl` 是唯一真相；**不建任何派生索引文件**（原 instance_images.json 已废除：双份存储存在一致性漂移风险，需要实例名→图关系时由消费者从 images.jsonl 现场聚合，如 viewer/build_viewer.py）。
+- `metadata.jsonl` 是唯一真相；**不建任何派生索引文件**（双份存储存在一致性漂移风险，需要实例名→图关系时由消费者从 metadata.jsonl 现场聚合，如 viewer/build_viewer.py）。
 - `images.jsonl` 的 instances 字段只应是当前体系的实例名；体系演化后残留的死名打标从 images.jsonl 剥离（无隔离区）。
 - 一张图的 instances 变更（改名/隔离）改的是 images.jsonl，**图字节不动**。
 - 新元数据字段设计时必须先问"哪个消费者读它"；答案为空就不加。
@@ -134,12 +134,14 @@ datasets/demiwtg/blobs/<aa>/<sha256>.<ext>   # aa = sha256 前两位；sha256 = 
 
 | 模块 | 职责 | 入口 |
 |---|---|---|
-| `data/taxonomy/` | 标签体系维护：树审计（audit_nodes 死叶子审查）、挂载聚合（mount_map，只读现算不落盘）、富化（gen_taxonomy_kb 节点 KB / gen_instance_kb 实例知识，各一次 LLM 调用） | 各脚本 `--write` |
-| `data/collect_v2/` | 图片采集 v2：infra/算子/chain 三层架构，检索→下载→落盘/打标链路编排（op_seed/op_search/op_download/op_sink/op_annotate，chain.py 串联，smoke_* 分层验证）；存量迁移链（op_backfill 补标算子 + migrate.py 记录驱动入口，images.jsonl → metadata.jsonl） | `data/collect_v2/chain.py`；迁移 `data/collect_v2/migrate.py` |
-| `data/curation/` | 数据策展：数据集分析 notebook（dataset_analysis.ipynb，参数写在 cell 内部，直接运行）：① danbooru2024 metadata.parquet 字段字典 + 单字段下钻（取值分布/TopN 覆盖/Gini/均衡化提示/抽样看 case）；② demiwtg 权威清单（metadata.jsonl）得分分布与按源对比、多实例与重复检查、每实例图数分布、按阈值过滤看 case；③ taxonomy 视角：mount_map 现算节点量级/CSV 导出/按节点抽样看图，只读（评测集分析 notebook 已挪入 benchmark/） | notebook 直接运行 |
+| `data_pipeline/` | 自动化生产管线（原 data/collect_v2）：operators/ 四算子（dict 行模型，一算子一文件自包含）——seed（SeedStage 实例行→种子行集）、search（SearchStage 种子行→候选行集：域路由内部策略+13 引擎自声明限速+dict 映射）、download（DownloadStage+防盗链头表）、annotate（AnnotateSinkStage+打标口径+清单契约+LLM 端点配置声明）；编排 flow.py 纯声明（算子列表→demiflow run_stages）+ supervise.py 看门狗 + landing_url 富化编排（enrich_landing：CrawlStage 抓取 + PersistStage 落盘，operators/crawl.py）；存量迁移链（migrate/backfill）已随迁移收官退役删除（2026-09-04·十三，git 历史可找回）；smokes/ 八件冒烟（含打标口径金测，python3 -m data_pipeline.smokes.<名>） | 采集 `data_pipeline/flow.py`；守护 `data_pipeline/supervise.py`；迁移 `data_pipeline/migrate.py`；富化 `data_pipeline/enrich_landing.py` |
+| `data_pipeline/webgate/` | SearXNG 服务部署件（searxng 引擎数据面）：免 docker 裸进程（GitHub 浅克隆+独立 venv，仅本机 127.0.0.1:8080；JSON format 须 settings 显式开否则 403；直连优先、受限网络机器开 outgoing.proxies；弱引擎 settings engines 段 disable） | `bash data_pipeline/webgate/start.sh`（冒烟 `smoke.sh`，停止 `stop.sh`） |
+| （已迁出）curation/taxonomy | 人工精审与知识组织（树审计/挂载聚合/KB 富化/分析 notebook）已随 2026-09-04·十二 从本仓删除，后续移居模型训练侧；其只读挂载聚合函数由 migrate 与 benchmark eval_sample 内联副本承载；树数据资产仍在 datasets/demiwtg/meta/ | — |
 | `viewer/` | 查看器闭环：页面 tag_tree_explorer.html（+ tag_tree_explorer_en.html 英文平行页，由 --lang en 从主页现场替换生成，单一来源防漂移）+ 构建脚本 build_viewer.py（--lang en 读英文两件套）+ 产物 build/、build_en/（sidecar taxonomy.js/instances.js/imgs.js 与 standalone 单文件，gitignore；英文侧 imgs.js 注入 null，英文版无图）；HTML 与 build/ 同址是 file:// 双击可用的硬要求 | `viewer/build_viewer.py` |
 | `benchmark/` | 评测基准：按三大题型拆成三子模块（见架构决策 2026-08-24 三子模块拆分）。**t2i/**（生成）与 **edit/**（编辑）各带完整四件套：抽样（eval_sample.py 分层配额，--filter 一条 duckdb SQL WHERE；edit 版默认叠加编辑适配门）、出题（eval_synthesize.py，Galaxy API；t2i 版含 facet 词表审计、edit 版 9 类 edit_type 轮转 + 每第 5 题知识编辑套）、判分（eval_score.py 调本地 vLLM judge，score/dump 子命令；t2i 版 FACETS 权威源 + φ 映射聚合，edit 版 EDIT_DIMS 三维钳制）、gen_results_review.py（生成审阅 notebook）；**vlm/**（理解）暂不拆代码，只放 notebook。每子模块两个 notebook：question_dev.ipynb（抽样+分布+题库审阅，for 题目构造）、results_review.ipynb（打分/评估结果分析）。评测数据在各子模块 data/ 下（样本图/题库/判分产物，均不入 git，.gitignore 登记）；编辑评分契约 edit/edit_score_prompts.json（ImgEdit 官方原文，随代码入 git） | 各脚本 `--help`；各子模块 `question_dev.ipynb` / `results_review.ipynb` |
 
+> **架构决策（2026-09-04）**：采集网关 data/webgate 模块 + searxng 第 13 源 + landing_url 富化链 + collect_v2 瑕疵修复（用户拍板：接 SearXNG/Crawl4AI、免 docker、webgate 不做独立子项目而是收编入 data/ 成第四模块随主仓入库、顺手修瑕疵）。webgate：SearXNG 免 docker 裸进程（PyPI 的 searxng 包是 7KB 占位包不可用，正路为 GitHub 浅克隆 + pip install -r requirements 到模块内 .venv；入库面=脚本三件 + settings.yml.example，运行时重物 searxng 克隆/.venv/log/run/settings.yml 由主仓 .gitignore 排除；settings.yml 由 start.sh 从 *.example 生成随机 secret；JSON format 必须在 settings 显式开否则一律 403；直连优先，受限网络机器再开 outgoing.proxies 走 109；smoke 用单引擎查询防弱引擎拖超时）。collect_v2 侧定案：① op_search 新增 SearxngAdapter（categories=images、language 对位 zh-CN/en、档位候选 [img_src, thumbnail_src] 走下载轮转兜死链、native.engine 引擎溯源）+ getsource zh/latin 双行挂载 + infra 双闸（检索本机直连 10rps；dl:searxng 标 proxy 走代理 15rps——不走 _PROXY_SOURCES 联动以免把本机检索端点也挂代理，由新增的 _limits_for 精确键优先解析支持）；② 新增 op_crawl（Crawl4AI 进程内库，惰性 import，代理 BrowserConfig 显式传参不读 env）+ enrich_landing 入口（migrate.py 先例：metadata.jsonl 的 landing_url 去重→抽正文→state/collect/crawl/ 落 pages/<sha(url)>.md + index.jsonl，failed 下次重跑重试；crawl4ai 装主仓 .venv）；③ 瑕疵修复四项：Seed/Item 拆 types.py（op_search 不再兼职全链类型库）、API_UA/BROWSER_UA 归位 infra、删 WorkPool/GLOBAL_CONCURRENCY 死代码（主链并发由 chain worker 数封顶，该原语无生产消费者）、新增 vlm.py 统一 VLM 端点常量与共享客户端生命周期（chain/migrate 改 vlm.configure/aclose，op_seed/op_annotate/op_backfill 不再各自复制 DEFAULT_ENDPOINT/裸建客户端）；④ smoke_sink 修正为 2026-08-21 改判后契约（(sha,instance) 去重、同图跨实例追加新行——原冒烟仍在断言旧「sha 撞车跳过」语义，属存量坏测试顺手修正）。端口登记：8080 webgate/SearXNG（仅本机监听，列于 modelhub 4000/7891/9091/1053 之外）。验证：全量 smoke_* 通过（新增 smoke_searxng/smoke_crawl）+ searxng E2E 实测（检索 5 条→下载成功 2 认缺 1，bing/wikicommons 引擎）。
+>
 > **架构决策（2026-08-25）**：新开 `modelhub/` 独立子项目（用户拍板：可单独 push GitHub、其他机器 pull 直接复用；静态代理全套并入）。定位：本地 LLM 统一接入层——LiteLLM 网关（127.0.0.1:4000，OpenAI 兼容）路由三条线：本地 vLLM（qwen3.8-27b，no_proxy 直连）、Galaxy 专线（qwen3.7-plus，no_proxy 直连）、OpenRouter 通配（进程级代理注入 → mihomo 按域名分流走静态住宅 IP 出口）；静态代理模块即原 `/root/gpu-static-proxy`（mihomo v1.19.30 双层链式：10808 隧道换源 IP → 静态 IP 节点 216.132.205.99；modelhub 只维护「AI API 域名走 STATIC 双层静态出口」一层规则，其余流量 modelhub 视角直连、继承宿主策略、不感知不维护）整体迁入 `modelhub/static_proxy/`（二进制与 GeoIP 库随迁，旧目录作废可删）。定案：① 照 bagel 先例：独立 git 仓库、主仓 .gitignore 整体排除、内部自治（自带 README，不受主仓「文档只两份」约束）；② 机密零入库：.env（API keys）与 static_proxy/config.yaml（节点凭据）只进 gitignore，仓内只有 *.example 模板；mihomo 二进制不入库（fetch_mihomo.sh 下载/旧机拷贝）；③ Python 环境独立：modelhub/.venv（litellm[proxy]==1.98.0 锁定），不碰主仓 .venv（不动主仓 openai/httpx/pydantic）；④ 消费端零改动启用：网关为 OpenAI 兼容端点，既有脚本换 LLM_BASE_URL=http://127.0.0.1:4000/v1 即接入，逐步迁移；上游端点与 key 全部 .env 可配置，启动时 gateway/gen_local_models.py 自动发现各 *_API_BASE 端点的模型并注册进 /v1/models（openrouter/* 通配 litellm 原生展开；Cline 按 OpenAI Compatible 配置网关地址即自动带出模型列表）；⑤ 端口登记（均仅本机监听）：4000 网关 / 7891 mihomo mixed / 9091 mihomo API / 1053 mihomo DNS。
 >
 > **架构决策（2026-08-24）**：英文版标签体系入库（用户拍板三则：扩白名单同居 meta/、实例名轻量清洗、查看器 --lang en 独立页面）。「融合世界标签体系 v3.1」交付包英文底稿（taxonomy_tree_instances_en.csv：21,406 行，中文路径/英文路径/英文实例清单三列）由 `taxonomy/upgrade_v31_en.py` 建成一套完全独立的英文平行数据（干跑→--apply，照中文版惯例；不动中文三件套与 alias_western.json）。定案：① taxonomy_en.json / instances_en.json 同居 meta/，2.2 白名单扩两行 + .gitignore 例外链放行入 git；② 前缀归一为中文 norm_path 的英文同款（剥根 Fused World Label System + General Classification Tags，换根 demiwtg），底稿缺行的 4 个骨架域与中文同源隐式补齐；③ 底稿实测 119 组翻译撞车（不同中文节点译成同一英文路径，如 炊具/锅具 → Cookware，名单重合度中位数仅 0.02）用户拍板自然合并（名单取并集），另 2 个译名折叠展开隐式节点（中文段『帝王蟹/蟹』译成 King Crab / Crab 两段）→ 英文树 21,291 节点 = 中文树 21,409 - 撞车合并 120 + 折叠展开 2，域级对齐（撞车与折叠清单落 state/taxonomy/en_merge_report.json 供后续精译修复）；④ 英文实例名轻量清洗（按词：全小写/全大写词转首字母大写，全大写缩写与混排词保留），清洗后同名大小写变体合并（name 唯一主键），413,329 → 382,341 全量 source=derived 占位入库（不做富知识、不映射中文知识），清洗合并明细落 state/taxonomy/en_clean_report.json；⑤ viewer 复用：build_viewer.py 加 --lang en，读英文两件套写 viewer/build_en/ sidecar（imgs.js 注入 null——英文实例与 images.jsonl 打标零交集，英文版无图是预期），页面 tag_tree_explorer_en.html 由主页面现场替换生成（标题 demiwtg (EN)、sidecar ?v=1 独立缓存号、fetch 回退改英文两件套），页面入 git、build_en/ 产物不入。结构对齐验证以中文路径列为桥：归一中文路径 21,405 ⊆ 中文树，差集恰为 4 骨架域。纯新增零覆写，故无入库前备份。图数据（images.jsonl/metadata.jsonl）零改动。
@@ -199,24 +201,23 @@ datasets/demiwtg/blobs/<aa>/<sha256>.<ext>   # aa = sha256 前两位；sha256 = 
 ## 4. 数据与代码的边界
 
 - `datasets/`、`state/`、`logs/`、`.qoder/` 是本地数据/运行时产物，**不入 git**（.gitignore 强制；例外：datasets/demiwtg/meta 下 taxonomy 三件套）。
-- 入库的只有：代码（data/collect_v2、data/taxonomy、data/curation、viewer/、benchmark/，含 viewer 页面 HTML）、约束文档（AGENTS.md、README.md）、以及 `datasets/demiwtg/meta/` 下的权威 JSON（taxonomy.json/instances.json/alias_western.json）。
+- 入库的只有：代码（data_pipeline/（operators/+webgate/）、viewer/、benchmark/，含 viewer 页面 HTML）、约束文档（AGENTS.md、README.md）、以及 `datasets/demiwtg/meta/` 下的权威 JSON（taxonomy.json/instances.json/alias_western.json）。
 - 大 JSON（images.jsonl、blobs）永远不进 git；需要备份走独立通道。
 - 生成产物（`viewer/build/`）不入 git，数据改动后重跑 build_viewer.py。
 
 ## 5. 关键命令
 
 ```bash
-# 标签体系富化（LLM 各一次调用；需 LLM_API_KEY 等环境变量；dry-run 零成本预览）
-python3 data/taxonomy/gen_taxonomy_kb.py --only-empty --write       # 节点 KB（knowledge_intro 等 4 字段）
-python3 data/taxonomy/gen_instance_kb.py --only-empty --write   # 实例知识（desc/query/aliases）
-
 # viewer 产物重建（数据改动后）
 python3 viewer/build_viewer.py
 
-# 数据策展（无脚本入口；分析 notebook 在 data/curation/ 内直接运行）
+# 采集管线（demiflow 平台；依赖 demiflow 库 pip install -e ../demiflow；仓库根直接 -m）
+python3 -m data_pipeline.flow --limit 200
+python3 -m data_pipeline.supervise -- --skip-covered 8   # 夜跑看门狗（托管 flow，停摆 kill 重拉）
+python3 -m data_pipeline.enrich_landing --limit 100      # landing_url 富化（Crawl4AI）
 
-# 采集 v2（检索→下载→落盘链路；smoke_* 为分层验证入口；包根在 data/）
-python3 -m data.collect_v2.chain ...   # 或 PYTHONPATH=data 后 python3 -m collect_v2.chain ...
+# SearXNG 网关（searxng 引擎的数据面，随管线入库）
+bash data_pipeline/webgate/start.sh && bash data_pipeline/webgate/smoke.sh   # 停止: stop.sh
 
 # modelhub LLM 网关 + 静态代理（独立子项目；详见 modelhub/README.md）
 bash modelhub/start.sh && bash modelhub/smoke.sh   # 启动+冒烟；停止: bash modelhub/stop.sh [--all]
@@ -228,7 +229,7 @@ bash modelhub/start.sh && bash modelhub/smoke.sh   # 启动+冒烟；停止: bas
 - ❌ 手改 blobs/ 下的文件（包括"顺手修一下坏图"——正确做法是重新采集）
 - ❌ 删除图片目录前不做 blobs 内容比对
 - ❌ 新增只写不读的"审计/日志"文件
-- ❌ 在 `data/`（collect_v2/taxonomy/curation）、`viewer/`、`benchmark/` 之外新增脚本（`bagel/`、`modelhub/` 子项目内部自治，不受此限）
+- ❌ 在 `data_pipeline/`、`viewer/`、`benchmark/` 之外新增脚本（`bagel/`、`modelhub/` 子项目内部自治，不受此限）
 - ❌ 往 datasets/ 里放代码、页面或生成产物（viewer 页面与产物在 viewer/ 内闭环）
 - ❌ 恢复历史过程文档（docs/、子目录 README）
 - ❌ 在数据/代码里使用 category、leaf、root 作为分类概念

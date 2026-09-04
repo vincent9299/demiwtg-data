@@ -1,4 +1,4 @@
-"""collect_v2 标注算子：输入 Item（已下载）→ 在同一 Item 上追加标注字段。
+"""collect_v2 标注算子：图像行 → 追加标注键（dict 行，自包含）。
 
 契约（.qoder/handoff_collect_v2.md §4.2 + 2026-08-21 拍板）：
 - 端到端含 VLM 消费方，位于 sink 之前；
@@ -13,7 +13,7 @@
 - 只打分不把关：不做任何阈值拒收（kb_match 分段已定性不是归属验收闸门）；
 - 实例知识来自 datasets/demiwtg/meta/instances.json 只读查表（name→desc/aliases），
   prompt 只给实体本身不给分类路径（旧约定）；
-- 预处理（缩最长边 + JPEG base64）只影响模型输入，不动 Item.data 原始字节。
+- 预处理（缩最长边 + JPEG base64）只影响模型输入，不动行内 data 原始字节。
 """
 
 from __future__ import annotations
@@ -28,10 +28,25 @@ from typing import Optional
 import httpx
 from PIL import Image
 
-from collect_v2.op_search import Item
+from demiflow.collect.llm import (AsyncLLMClient, get_llm_client,
+                                  register_endpoint)
+from demiflow.collect.store import AppendManifestStore
+from demiflow.data.plan import StreamStage
 
-DEFAULT_ENDPOINT = "http://localhost:8000/v1/chat/completions"
-DEFAULT_MODEL = "qwen3.8-27b"
+# ---------------------------------------------------------------------------
+# LLM 端点资源声明（demiflow 平台注册表：算子只给配置，客户端/连接池/
+# 生命周期归平台；跨机器部署走 env 覆盖零代码改动）
+# ---------------------------------------------------------------------------
+register_endpoint(
+    "demiwtg_vlm",
+    base_url="http://localhost:8000/v1/chat/completions",
+    model="qwen3.8-27b",
+    max_connections=56,          # 池上限给足（夜跑 CLOSE-WAIT 教训），编排可 reconfigure
+    timeout=600.0,
+    base_url_env="DEMIFLOW_VLM_BASE_URL",
+    model_env="DEMIFLOW_VLM_MODEL",
+)
+
 MAX_EDGE = 768            # 送模型前最长边缩放阈值；2026-08-22 由 1024 降至 768（用户拍板）：
                           # 40 图 A/B 实测 85%+ 打分完全一致、均值偏移 ≤±0.25、identity 仅 1 翻转，
                           # 质量代价可忽略，prefill 视觉 token 减 ~44% 换打标吞吐（只影响新图口径）
@@ -100,7 +115,7 @@ def load_instance_kb(path) -> dict:
 
 
 def build_block(instance: str, kb: dict) -> str:
-    """单实例知识块（V2 一条 Item 只对应一个种子实例）。"""
+    """单实例知识块（一条行只对应一个种子实例）。"""
     rec = kb.get(instance) or {"desc": "", "aliases": []}
     lines = [f"实体：{instance}"]
     if rec["aliases"]:
@@ -156,30 +171,26 @@ def parse_annotation(text: str) -> Optional[dict]:
             "identity": ident, "focus": fo}
 
 
-async def _call_vlm(client: httpx.AsyncClient, b64: str, blocks: str, *,
-                    endpoint: str, model: str) -> Optional[dict]:
-    """调 VLM，解析成功返回标注 dict；网络/解析失败重试耗尽返回 None。"""
-    payload = {
-        "model": model,
-        "max_tokens": MAX_TOKENS,
-        "temperature": 0.0,
-        # Qwen3.8 默认开 thinking，会把 token 预算耗在推理链上；批量打标关掉
-        "chat_template_kwargs": {"enable_thinking": False},
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": [
-                {"type": "image_url",
-                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                {"type": "text", "text": USER_PROMPT_TPL.format(blocks=blocks)},
-            ]},
-        ],
-    }
+async def _call_vlm(client: AsyncLLMClient, b64: str,
+                    blocks: str) -> Optional[dict]:
+    """调 VLM，解析成功返回标注 dict；网络/解析失败重试耗尽返回 None。
+
+    机制（HTTP/参数构造）在 demiflow 平台端点资源（get_llm_client）
+    （单次尝试失败上抛）；本函数持有口径：prompt、json_mode+关 thinking、
+    解析重试循环（网络失败与解析失败统一固定间隔重试，是数据可比性契约）。"""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": [
+            {"type": "image_url",
+             "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            {"type": "text", "text": USER_PROMPT_TPL.format(blocks=blocks)},
+        ]},
+    ]
     for attempt in range(RETRIES):
         try:
-            r = await client.post(endpoint, json=payload, timeout=VLM_TIMEOUT)
-            r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"]
+            content = await client.chat(
+                messages, max_tokens=MAX_TOKENS, temperature=0.0,
+                json_mode=True, thinking=False, timeout=VLM_TIMEOUT)
             ann = parse_annotation(content)
             if ann is not None:
                 return ann
@@ -190,39 +201,143 @@ async def _call_vlm(client: httpx.AsyncClient, b64: str, blocks: str, *,
     return None
 
 
-async def annotate(
-    item: Item,
-    kb: dict,
-    *,
-    client: Optional[httpx.AsyncClient] = None,
-    endpoint: str = DEFAULT_ENDPOINT,
-    model: str = DEFAULT_MODEL,
-) -> Item:
-    """对单条已下载 Item 打标，在同一 Item 上追加标注字段并返回。
+async def annotate(row: dict, kb: dict) -> dict:
+    """对单条已下载图像行打标，就地追加标注键并返回。
 
-    VLM 失败（或字节编码失败）→ 标注字段留 None 原样放行（用户拍板不弃图）。
+    未下载（无 data）/编码失败的行原样流转（缺列=未打标）；打标失败
+    重试耗尽也原样流转（null=打过失败，两者由读端区分）。
     """
-    if item.data is None:
-        return item     # 未下载的 Item 不打标，原样流转
+    if row.get("data") is None:
+        return row
     # PIL 解码/缩放是同步阻塞的，丢线程池避免卡死事件循环
-    b64 = await asyncio.to_thread(encode_for_vlm, item.data)
+    b64 = await asyncio.to_thread(encode_for_vlm, row["data"])
     if b64 is None:
-        return item
-    http = client or httpx.AsyncClient()
-    own_client = client is None
-    try:
-        ann = await _call_vlm(http, b64, build_block(item.instance, kb),
-                              endpoint=endpoint, model=model)
-    finally:
-        if own_client:
-            await http.aclose()
+        return row
+    ann = await _call_vlm(get_llm_client("demiwtg_vlm"), b64,
+                          build_block(row["name"], kb))
     if ann is not None:
-        item.kb_match = ann["kb_match"]
-        item.richness = ann["richness"]
-        item.caption = ann["caption"]
-        item.identity = ann["identity"]
-        item.focus = ann["focus"]
         w_kb, w_fo, w_ri = QUALITY_WEIGHTS
-        item.quality = round(w_kb * ann["kb_match"] + w_fo * ann["focus"]
-                             + w_ri * ann["richness"], 1)
-    return item
+        row.update(ann)
+        row["quality"] = round(w_kb * ann["kb_match"] + w_fo * ann["focus"]
+                               + w_ri * ann["richness"], 1)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# 清单契约（原 op_sink 迁入：字段最小兼容面 + 去重键 + blob 布局）
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+# metadata.jsonl 字段集（最小兼容面，对齐读端口径；有新消费者再加）
+RECORD_FIELDS = (
+    "sha256", "ext", "source", "license", "author",
+    "width", "height", "orig_width", "orig_height",
+    "size_bytes", "mime", "instances", "queries", "query_langs",
+    "content_url", "landing_url", "fetched_at", "path",
+    "kb_match", "richness", "caption", "identity", "focus", "quality",
+)
+
+
+def _row_keys(rec: dict) -> list:
+    """清单行 → 去重键集（引擎 store 的 key_of 注入；存量兼容空实例名）。"""
+    return [(rec.get("sha256"), inst) for inst in rec.get("instances") or [""]]
+
+
+def _record_for(row: dict, rel_path: str) -> dict:
+    """图像行 → 最小兼容字段集的清单行（字段映射是 demiwtg 契约）。"""
+    rec = {
+        "sha256": row["sha256"],
+        "ext": row["ext"],
+        "source": row["source"],
+        "license": row.get("license"),
+        "author": row.get("author"),
+        # 实测尺寸（下载解码）优先，缺则声明尺寸
+        "width": row.get("actual_width") or row.get("width"),
+        "height": row.get("actual_height") or row.get("height"),
+        "orig_width": row.get("width"),
+        "orig_height": row.get("height"),
+        "size_bytes": row.get("size_bytes"),
+        "mime": row.get("mime"),
+        "instances": [row["name"]],
+        "queries": {row["name"]: row.get("query")},
+        "query_langs": {row["name"]: row.get("lang")},
+        "content_url": row.get("content_url"),
+        "landing_url": row.get("landing"),
+        "fetched_at": _time.time(),
+        "path": rel_path,
+        "kb_match": row.get("kb_match"),
+        "richness": row.get("richness"),
+        "caption": row.get("caption"),
+        "identity": row.get("identity"),
+        "focus": row.get("focus"),
+        "quality": row.get("quality"),
+    }
+    return {k: rec.get(k) for k in RECORD_FIELDS}
+
+
+class ManifestSink:
+    """数据集落盘器：blobs/<sha前2>/<sha>.<ext> 内容寻址 + 清单追加幂等。
+
+    机制在 demiflow.collect.store.AppendManifestStore（原子写/跨进程幂等/
+    吸收式尾扫）；本类只持布局与字段契约。
+    """
+
+    def __init__(self, dataset_dir: str, manifest_name: str = "metadata.jsonl"):
+        import os
+        self.dataset_dir = dataset_dir
+        self.manifest = os.path.join(dataset_dir, "meta", manifest_name)
+        os.makedirs(os.path.dirname(self.manifest), exist_ok=True)
+        os.makedirs(os.path.join(dataset_dir, "blobs"), exist_ok=True)
+        self._store = AppendManifestStore(
+            manifest=self.manifest,
+            lock_path=os.path.join(os.path.dirname(self.manifest),
+                                   f".{manifest_name}.lock"),
+        )
+
+    def load_index(self) -> int:
+        """启动期全量扫清单建 (sha256, instance) 索引（续跑依据）。"""
+        return self._store.load_index(_row_keys)
+
+    def contains(self, row: dict) -> bool:
+        """无锁快查：该行是否已落盘（撞车前置省 VLM 打标）。"""
+        sha = row.get("sha256")
+        return bool(sha) and self._store.contains((sha, row.get("name") or ""))
+
+    async def sink(self, row: dict) -> bool:
+        """落盘单行；返回 False = 同 (sha,name) 已存在（幂等跳过）。"""
+        if not row.get("data") or not row.get("sha256") or not row.get("ext"):
+            return False
+        rel_path = f"blobs/{row['sha256'][:2]}/{row['sha256']}.{row['ext']}"
+        import os
+        return await self._store.write(
+            data=row["data"],
+            blob_path=os.path.join(self.dataset_dir, rel_path),
+            key=(row["sha256"], row.get("name") or ""),
+            record=_record_for(row, rel_path))
+
+
+class AnnotateSinkStage(StreamStage):
+    """标注+落盘算子（合并一级：sink 是毫秒级本地 IO 不值得独立队列级；
+    contains 前置快查省 VLM——撞车高发场景 9 成打标开销在此省掉）。
+
+    行契约：读键 name/data/sha256/ext/...；追加标注键（annotate）；
+    落盘成功行继续流转（engine emitted=sunk）。catch=()：真异常终止整链。
+    queue_depth 缺省=并发（字节上界语义：内存上界 = vlm并发 × 20MB）。
+    """
+    label = "annotate_sink"
+    concurrency = 48
+
+    def __init__(self, sink: ManifestSink, kb: dict):
+        self.sink, self.kb = sink, kb
+        self.annotated = 0        # 业务计数自持（编排只读打印）
+
+    async def __call__(self, row: dict):
+        if self.sink.contains(row):
+            return None
+        await annotate(row, self.kb)
+        if row.get("kb_match") is not None:
+            self.annotated += 1
+        if await self.sink.sink(row):
+            return row
+        return None
