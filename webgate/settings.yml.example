@@ -1,0 +1,29 @@
+# SearXNG 配置模板（start.sh 首次复制为 settings.yml 并注入随机 secret_key）
+# 端口登记：127.0.0.1:8080（demiwtg AGENTS.md 端口惯例；modelhub 4000/7891/9091/1053 之外的增量）
+
+use_default_settings: true
+
+server:
+  # 仅本机监听：消费端是同机 collect_v2，不对外暴露
+  base_url: http://127.0.0.1:8080/
+  port: 8080
+  bind_address: "127.0.0.1"
+  # secret_key 由 start.sh 生成注入（settings.yml 不入 git）
+  secret_key: "REPLACE_ME"
+  limiter: false          # 本机单消费者，无需限流
+  public_instance: false  # 私有实例
+
+search:
+  safe_search: 1
+  autocomplete: ""
+  # JSON API 默认关闭，必须显式开启（否则 /search?format=json 一律 403）
+  formats:
+    - html
+    - json
+
+# 出网代理（直连优先，AGENTS.md §7 同款 doctrine）：本机直连可达 Google/Bing 就直连，
+# 本文件不放空 outgoing: 段（schema 校验会拒绝 None 段）。
+# 部署在受限网络的机器上时，在下方追加（按机器实测增删）：
+# outgoing:
+#   proxies:
+#     all://: http://192.168.10.109:10808

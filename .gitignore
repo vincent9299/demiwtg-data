@@ -1,71 +1,10 @@
-# 生成的 viewer 产物（由 viewer/build_viewer.py 重建，勿提交；build_en/ 为英文平行版 sidecar）
-viewer/build/
-viewer/build_en/
-
-# 系统 / 编译产物
-.DS_Store
 __pycache__/
 *.pyc
-
-# WorkBuddy 运行时目录（系统内部，勿提交）
-.workbuddy/
-.vscode/
-
-# Kilo 本地运行时配置与状态（agent-manager 会话状态等，勿提交）
-.kilo/
-
-# 本地数据与运行时产物（见 AGENTS.md 第 2/4 节，勿提交）
-# 例外：datasets/demiwtg/meta 下 taxonomy 三件套 + 英文平行两件套为权威 JSON，入库（见 AGENTS.md 第 4 节）
-datasets/*
-!datasets/demiwtg/
-datasets/demiwtg/*
-!datasets/demiwtg/meta/
-datasets/demiwtg/meta/*
-!datasets/demiwtg/meta/taxonomy.json
-!datasets/demiwtg/meta/instances.json
-!datasets/demiwtg/meta/alias_western.json
-!datasets/demiwtg/meta/taxonomy_en.json
-!datasets/demiwtg/meta/instances_en.json
 state/
 logs/
-
-# 评测结果数据（各赛道子模块内闭环，大体积样本图与题库产物，勿提交）
-benchmark/vlm/data/
-benchmark/t2i/data/
-benchmark/edit/data/
-.qoder/*
-# 交接文档进仓（V2 重写的权威工作文档）
-!.qoder/handoff_collect_v2.md
-
-# LLM 生成的源 spec 残留规则已随 collect v1 删除（2026-08-21）
-
-# 本地临时验证目录（stream 冒烟等一次性产物，勿提交）
-_st_tmp/
-
-# bagel 子项目（独立仓库，自带 .git 与 .gitignore，整体不入主仓；见 AGENTS.md 架构决策 2026-08-23）
-bagel/
-
-# modelhub 子项目（独立仓库，自带 .git 与 .gitignore，整体不入主仓；见 AGENTS.md 架构决策 2026-08-25）
-modelhub/
-
-# webgate 模块运行时重物（SearXNG 上游浅克隆、独立 venv、日志/pid、含 secret 的运行配置；
-# 脚本与 settings.yml.example 入库，见 AGENTS.md 架构决策 2026-09-04）
-data_pipeline/webgate/.venv/
-data_pipeline/webgate/searxng/
-data_pipeline/webgate/log/
-data_pipeline/webgate/run/
-data_pipeline/webgate/settings.yml
-
-# 本地模型权重与部署产物（Qwen3.8-27B 等，勿提交）
-models/
-
-# 项目公共 Python 环境（原 bagel/env，2026-08-24 提升为公共并改名 .venv；勿提交）
-.venv/
-
-# 外部数据集包与一次性分析产物（勿提交）
-annotations_trainval2017.zip
-dataset_value_ranking_top500.md
-_reference/
-# 本地密钥（永不入 git；.env* 连 .env copy 之类手滑副本一并挡住）
-.env*
-*.secret
+webgate/.venv/
+webgate/searxng/
+webgate/log/
+webgate/run/
+webgate/settings.yml
+.qoder/
