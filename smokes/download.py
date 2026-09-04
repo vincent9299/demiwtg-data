@@ -30,7 +30,9 @@ def cand(tiers, source="baidu", **kw):
 
 async def main() -> None:
     net.RETRY_INTERVAL = 0.05
-    stage = download.DownloadStage()
+    import tempfile
+    tmp_ds = tempfile.mkdtemp(prefix="smoke_dl_")
+    stage = download.DownloadStage(tmp_ds)
 
     good = png(100, 80)
     bigger = png(200, 160)
@@ -47,8 +49,14 @@ async def main() -> None:
     assert row["sha256"] == __import__("hashlib").sha256(good).hexdigest()
     assert row["ext"] == "png" and row["mime"] == "image/png"
     assert row["actual_width"] == 100 and row["actual_height"] == 80
-    assert row["size_bytes"] == len(good) and row["data"] == good
-    print("[PASS] 档位轮转 + dict 追加键齐全")
+    assert row["size_bytes"] == len(good)
+    # 引用化：行不携字节，blob 已原子落盘
+    import os
+    assert "data" not in row
+    assert row["blob_path"] == f"blobs/{row['sha256'][:2]}/{row['sha256']}.png"
+    blob = os.path.join(tmp_ds, row["blob_path"])
+    assert open(blob, "rb").read() == good
+    print("[PASS] 档位轮转 + 引用化（blob 即时落盘、行不携字节）")
 
     # 2) 非图拒收不轮转
     net.set_download_client(httpx.AsyncClient(transport=httpx.MockTransport(

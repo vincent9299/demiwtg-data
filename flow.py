@@ -99,6 +99,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--instance-concurrency", type=int, default=16)
     p.add_argument("--shuffle", type=int, default=None, metavar="SEED")
     p.add_argument("--log-every", type=int, default=20)
+    p.add_argument("--shard", default="", metavar="I/N",
+                   help="分片运行：实例按 I::N 切片、清单与词表用分片后缀"
+                        "（分布式 D2 前置；每分片单写者，merge_shards.py 合并）")
     return p.parse_args()
 
 
@@ -122,11 +125,24 @@ def main() -> None:
     insts = insts[args.offset:]
     if args.limit > 0:
         insts = insts[:args.limit]
+    manifest_name = "metadata.jsonl"
+    alias_cache = args.alias_cache
+    if args.shard:
+        try:
+            i, n = (int(x) for x in args.shard.split("/"))
+            assert 0 <= i < n
+        except Exception:
+            raise SystemExit(f"--shard 需为 I/N 形式（收到 {args.shard!r}）")
+        insts = insts[i::n]                 # 输入分片：词表/闸门语义随分片正确
+        manifest_name = f"metadata-shard-{i}-of-{n}.jsonl"
+        alias_cache = f"{args.alias_cache}.shard{i}-of-{n}"
+        print(f"[flow] 分片 {i}/{n}：实例切片后 {len(insts)}，"
+              f"清单 {manifest_name}", flush=True)
     print(f"[flow] 待消费实例 {len(insts)}（top_n={args.top_n} k={args.k}）", flush=True)
 
-    cache = seed.SeedCache(args.alias_cache)
+    cache = seed.SeedCache(alias_cache)
     kb = annotate.load_instance_kb(args.instances)
-    sink = annotate.ManifestSink(args.dataset)
+    sink = annotate.ManifestSink(args.dataset, manifest_name=manifest_name)
     print(f"[flow] sink 去重索引 {sink.load_index()} 条 "
           f"（清单 {sink.manifest}）", flush=True)
     reconfigure_endpoint("demiwtg_vlm",
@@ -136,7 +152,7 @@ def main() -> None:
     stages = [
         seed.SeedStage(cache),
         search.SearchStage(args.top_n, args.k),
-        download.DownloadStage(),
+        download.DownloadStage(args.dataset),
         annotate.AnnotateSinkStage(sink, kb),
     ]
     concurrency = {

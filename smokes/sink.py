@@ -23,13 +23,20 @@ def png_bytes(w: int, h: int, rgb) -> bytes:
     return buf.getvalue()
 
 
-def downloaded_row(name: str, data: bytes, **kw) -> dict:
+def downloaded_row(name: str, data: bytes, dataset_dir: str, **kw) -> dict:
+    """构造下载产物行（引用化：blob 预写，行不携 data）。"""
+    from demiflow.collect.store import atomic_write_bytes
+    import os
+    sha = hashlib.sha256(data).hexdigest()
+    rel = f"blobs/{sha[:2]}/{sha}.png"
+    atomic_write_bytes(os.path.join(dataset_dir, rel), data)
     row = {"name": name, "query": name, "lang": "zh", "source": "baidu",
-           "tiers": ["https://x/a.png"], "data": data,
-           "sha256": hashlib.sha256(data).hexdigest(), "ext": "png",
+           "tiers": ["https://x/a.png"],
+           "sha256": sha, "ext": "png",
            "mime": "image/png", "content_url": "https://x/a.png",
            "size_bytes": len(data), "width": w_of(data), "height": h_of(data),
            "actual_width": w_of(data), "actual_height": h_of(data),
+           "blob_path": rel,
            "kb_match": 8, "richness": 7,
            "identity": True, "focus": 8, "caption": "描述", "quality": 7.8}
     row.update(kw)
@@ -58,7 +65,7 @@ def _mp_worker(dataset_dir: str, specs: list) -> None:
         sink = annotate.ManifestSink(dataset_dir)
         sink.load_index()
         for name, data in specs:
-            await sink.sink(downloaded_row(name, data))
+            await sink.sink(downloaded_row(name, data, dataset_dir))
     asyncio.run(run())
 
 
@@ -72,7 +79,7 @@ async def main() -> None:
         good = png_bytes(60, 40, (9, 9, 9))
 
         # 1) 正常落盘：行数/字段/内容寻址
-        row = downloaded_row("慕田峪长城", good)
+        row = downloaded_row("慕田峪长城", good, ds)
         assert await sink.sink(row)
         lines = read_manifest(sink)
         assert len(lines) == 1
@@ -87,13 +94,13 @@ async def main() -> None:
         print("[PASS] 落盘行/字段/内容寻址")
 
         # 2) 同 sha 异实例追加；同键幂等跳过
-        assert await sink.sink(downloaded_row("八达岭长城", good))
-        assert not await sink.sink(downloaded_row("八达岭长城", good))
+        assert await sink.sink(downloaded_row("八达岭长城", good, ds))
+        assert not await sink.sink(downloaded_row("八达岭长城", good, ds))
         assert len(read_manifest(sink)) == 2
         print("[PASS] 跨实例追加/同键幂等")
 
         # 3) 并发无丢行
-        batch = [downloaded_row(f"B{i}", png_bytes(30, 30, (i, 0, 0)))
+        batch = [downloaded_row(f"B{i}", png_bytes(30, 30, (i, 0, 0)), ds)
                  for i in range(20)]
         assert all(await asyncio.gather(*(sink.sink(dict(b)) for b in batch)))
         assert len(read_manifest(sink)) == 22

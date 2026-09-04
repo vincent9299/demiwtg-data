@@ -54,7 +54,7 @@ def searxng_handler(req: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json={"results": results})
 
 
-def run_flow(tmp: str, dataset_dir: str, inst_path: str):
+def run_flow(tmp: str, dataset_dir: str, inst_path: str, shard: str = ""):
     from operators import search
     from demiflow.collect import net
     from demiflow.collect.llm import (AsyncLLMClient, close_all_llm,
@@ -81,11 +81,14 @@ def run_flow(tmp: str, dataset_dir: str, inst_path: str):
     # 路由收敛到 searxng 单源（smoke 不打真源）
     _orig = dict(search.ROUTE_TABLE)
     search.ROUTE_TABLE = {"zh": ["searxng"], "latin": ["searxng"]}
-    sys.argv = ["flow", "--instances", inst_path, "--dataset", dataset_dir,
-                "--alias-cache", os.path.join(tmp, "alias_western.json"),
-                "--top-n", "2", "--vlm-concurrency", "4",
-                "--search-concurrency", "2", "--download-concurrency", "4",
-                "--instance-concurrency", "3", "--log-every", "1"]
+    argv = ["flow", "--instances", inst_path, "--dataset", dataset_dir,
+            "--alias-cache", os.path.join(tmp, "alias_western.json"),
+            "--top-n", "2", "--vlm-concurrency", "4",
+            "--search-concurrency", "2", "--download-concurrency", "4",
+            "--instance-concurrency", "3", "--log-every", "1"]
+    if shard:
+        argv += ["--shard", shard]
+    sys.argv = argv
     try:
         flow.main()
     finally:
@@ -127,6 +130,24 @@ def main() -> None:
         rows2 = [json.loads(l) for l in open(manifest, encoding="utf-8")]
         assert len(rows2) == 6, f"续跑应零追加，实际 {len(rows2)}"
         print("[PASS] 幂等续跑零追加")
+
+        # 5) 分片端到端：两分片各自单写者 → merge 合并 = 全量（D1 分布式形态）
+        from operators.annotate import merge_manifests
+        ds_shard = os.path.join(tmp, "demiwtg_sharded")
+        for idx in (0, 1):
+            run_flow(tmp, ds_shard, inst_path, shard=f"{idx}/2")
+        shards = sorted(f for f in os.listdir(os.path.join(ds_shard, "meta"))
+                        if not f.startswith("."))
+        assert shards == ["metadata-shard-0-of-2.jsonl",
+                          "metadata-shard-1-of-2.jsonl"], shards
+        r = merge_manifests(ds_shard)
+        assert r["output_rows"] == 6, r
+        merged = [json.loads(l) for l in open(
+            os.path.join(ds_shard, "meta", "metadata.jsonl"), encoding="utf-8")]
+        base_keys = {(x["sha256"], x["instances"][0]) for x in rows2}
+        merged_keys = {(x["sha256"], x["instances"][0]) for x in merged}
+        assert base_keys == merged_keys            # 分片并集 == 单进程全量
+        print("[PASS] 分片运行 + merge 合并 = 全量（每分片单写者）")
         print("冒烟全部通过")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

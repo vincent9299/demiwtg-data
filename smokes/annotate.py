@@ -35,10 +35,17 @@ async def main() -> None:
     tmp = tempfile.mkdtemp(prefix="smoke_annotate_")
     try:
         data = image_bytes()
+        sha = hashlib.sha256(data).hexdigest()
+        blob_rel = f"blobs/{sha[:2]}/{sha}.png"
+        from demiflow.collect.store import atomic_write_bytes
+        import os
+        os.makedirs(os.path.join(tmp, "demiwtg", os.path.dirname(blob_rel)),
+                    exist_ok=True)
+        atomic_write_bytes(os.path.join(tmp, "demiwtg", blob_rel), data)
         row = {"name": "慕田峪长城", "query": "慕田峪长城", "lang": "zh",
                "source": "baidu", "tiers": ["https://x/a.png"],
-               "data": data, "sha256": hashlib.sha256(data).hexdigest(),
-               "ext": "png", "content_url": "https://x/a.png"}
+               "sha256": sha, "ext": "png", "content_url": "https://x/a.png",
+               "blob_path": blob_rel}
 
         # 1) 口径金测：捕获请求载荷，逐字段断言与旧实现完全一致
         captured = {}
@@ -51,7 +58,8 @@ async def main() -> None:
         inject_endpoint_client("demiwtg_vlm", AsyncLLMClient(
             base_url="http://mock/v1", model="mock-model",
             http=httpx.AsyncClient(transport=httpx.MockTransport(capture))))
-        out = await annotate.annotate(dict(row), {"慕田峪长城": {"desc": "长城。", "aliases": []}})
+        out = await annotate.annotate(dict(row), {"慕田峪长城": {"desc": "长城。", "aliases": []}},
+                                dataset_dir=os.path.join(tmp, "demiwtg"))
         pl = captured["payload"]
         assert pl["model"] == "mock-model"
         assert pl["max_tokens"] == annotate.MAX_TOKENS
@@ -70,11 +78,11 @@ async def main() -> None:
             + annotate.QUALITY_WEIGHTS[2] * 7, 1)
         print("[PASS] 口径金测：载荷参数/消息结构/派生分与旧实现一致")
 
-        # 2) 无 data 行原样流转
+        # 2) 无 blob 引用行原样流转
         assert await annotate.annotate({"name": "x"}, {}) == {"name": "x"}
         print("[PASS] 未下载行原样流转")
 
-        # 3) AnnotateSinkStage：落盘 + 撞车跳过
+        # 3) AnnotateSinkStage：清单追加 + 撞车跳过（blob 已在下载侧落盘）
         ds = os.path.join(tmp, "demiwtg")
         sink = annotate.ManifestSink(ds)
         assert sink.load_index() == 0
@@ -87,9 +95,10 @@ async def main() -> None:
         lines = [json.loads(l) for l in open(sink.manifest, encoding="utf-8")]
         assert len(lines) == 2
         assert lines[0]["kb_match"] == 8 and lines[0]["instances"] == ["慕田峪长城"]
+        assert lines[0]["path"] == blob_rel               # 引用化路径
         blob = os.path.join(ds, lines[0]["path"])
         assert hashlib.sha256(open(blob, "rb").read()).hexdigest() == row["sha256"]
-        print("[PASS] 算子级落盘/幂等/跨实例追加")
+        print("[PASS] 算子级清单追加/幂等/跨实例追加（引用化）")
         await close_all_llm()
         print("冒烟全部通过")
     finally:

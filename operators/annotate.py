@@ -22,6 +22,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 import re
 from typing import Optional
 
@@ -201,16 +202,29 @@ async def _call_vlm(client: AsyncLLMClient, b64: str,
     return None
 
 
-async def annotate(row: dict, kb: dict) -> dict:
+def _read_blob(dataset_dir: str, rel: str):
+    try:
+        with open(os.path.join(dataset_dir, rel), "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+async def annotate(row: dict, kb: dict, *, dataset_dir: str = "") -> dict:
     """对单条已下载图像行打标，就地追加标注键并返回。
 
-    未下载（无 data）/编码失败的行原样流转（缺列=未打标）；打标失败
-    重试耗尽也原样流转（null=打过失败，两者由读端区分）。
+    字节按行内 blob_path 引用从数据集读取（D1 引用化：行不携 data）；
+    未下载（无 blob_path）/读失败/编码失败的行原样流转（缺列=未打标）；
+    打标失败重试耗尽也原样流转（null=打过失败，两者由读端区分）。
     """
-    if row.get("data") is None:
+    rel = row.get("blob_path")
+    if not rel:
+        return row
+    data = await asyncio.to_thread(_read_blob, dataset_dir, rel)
+    if data is None:
         return row
     # PIL 解码/缩放是同步阻塞的，丢线程池避免卡死事件循环
-    b64 = await asyncio.to_thread(encode_for_vlm, row["data"])
+    b64 = await asyncio.to_thread(encode_for_vlm, data)
     if b64 is None:
         return row
     ann = await _call_vlm(get_llm_client("demiwtg_vlm"), b64,
@@ -244,7 +258,7 @@ def _row_keys(rec: dict) -> list:
     return [(rec.get("sha256"), inst) for inst in rec.get("instances") or [""]]
 
 
-def _record_for(row: dict, rel_path: str) -> dict:
+def _record_for(row: dict) -> dict:
     """图像行 → 最小兼容字段集的清单行（字段映射是 demiwtg 契约）。"""
     rec = {
         "sha256": row["sha256"],
@@ -265,7 +279,7 @@ def _record_for(row: dict, rel_path: str) -> dict:
         "content_url": row.get("content_url"),
         "landing_url": row.get("landing"),
         "fetched_at": _time.time(),
-        "path": rel_path,
+        "path": row.get("blob_path"),
         "kb_match": row.get("kb_match"),
         "richness": row.get("richness"),
         "caption": row.get("caption"),
@@ -305,16 +319,19 @@ class ManifestSink:
         return bool(sha) and self._store.contains((sha, row.get("name") or ""))
 
     async def sink(self, row: dict) -> bool:
-        """落盘单行；返回 False = 同 (sha,name) 已存在（幂等跳过）。"""
-        if not row.get("data") or not row.get("sha256") or not row.get("ext"):
+        """追加清单单行；返回 False = 同 (sha,name) 已存在（幂等跳过）。
+
+        D1 引用化：blob 已由下载算子原子落盘（row.blob_path），本方法
+        只负责清单幂等追加——单写者分片文件下连接 fcntl 都是冗余防线。
+        """
+        rel = row.get("blob_path")
+        if not rel or not row.get("sha256"):
             return False
-        rel_path = f"blobs/{row['sha256'][:2]}/{row['sha256']}.{row['ext']}"
-        import os
         return await self._store.write(
-            data=row["data"],
-            blob_path=os.path.join(self.dataset_dir, rel_path),
+            data=b"",                       # blob 不重写（引用化）
+            blob_path=os.path.join(self.dataset_dir, rel),
             key=(row["sha256"], row.get("name") or ""),
-            record=_record_for(row, rel_path))
+            record=_record_for(row))
 
 
 class AnnotateSinkStage(StreamStage):
@@ -335,9 +352,56 @@ class AnnotateSinkStage(StreamStage):
     async def __call__(self, row: dict):
         if self.sink.contains(row):
             return None
-        await annotate(row, self.kb)
+        await annotate(row, self.kb, dataset_dir=self.sink.dataset_dir)
         if row.get("kb_match") is not None:
             self.annotated += 1
         if await self.sink.sink(row):
             return row
         return None
+
+
+# ---------------------------------------------------------------------------
+# 分片清单合并（2026-09-04·D1：分布式分片的离线汇合点）
+# ---------------------------------------------------------------------------
+
+def merge_manifests(dataset_dir: str, *, pattern: str = "metadata-shard-*.jsonl",
+                    output: str = "metadata.jsonl",
+                    dry_run: bool = False) -> dict:
+    """合并分片清单：行级去重键 (sha256, instances 元组)，先到先得。
+
+    输入：meta/ 下匹配 pattern 的分片文件（每分片单写者，天然无冲突）；
+    输出：meta/<output> 全量清单（pid 唯一临时文件 + os.replace 原子替换）。
+    blobs 不动（内容寻址天然去重）；坏行容忍（与读端口径一致）；
+    dry_run 只统计不落盘。返回 {shards, input_rows, output_rows, dup_dropped}。
+    """
+    import glob as _glob
+    meta = os.path.join(dataset_dir, "meta")
+    shard_files = sorted(_glob.glob(os.path.join(meta, pattern)))
+    seen: set = set()
+    out_lines: list = []
+    total = 0
+    for sf in shard_files:
+        with open(sf, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                total += 1
+                key = (rec.get("sha256"),
+                       tuple(rec.get("instances") or [""]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out_lines.append(line)
+    if not dry_run and out_lines:
+        os.makedirs(meta, exist_ok=True)
+        tmp = os.path.join(meta, f".{output}.merge.tmp.{os.getpid()}")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(out_lines) + "\n")
+        os.replace(tmp, os.path.join(meta, output))
+    return {"shards": len(shard_files), "input_rows": total,
+            "output_rows": len(out_lines), "dup_dropped": total - len(out_lines)}
