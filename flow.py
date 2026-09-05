@@ -83,7 +83,10 @@ def filter_uncovered(insts: list, counts: dict, min_images: int) -> tuple:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="collect_v2 采集编排（demiflow 声明式）")
     p.add_argument("--instances", default=DEFAULT_INSTANCES)
-    p.add_argument("--dataset", default=DEFAULT_DATASET)
+    p.add_argument("--dataset", default=DEFAULT_DATASET,
+                   help="清单/状态根（多机部署用本地盘：追加型写入不适合对象存储挂载）")
+    p.add_argument("--blob-root", default="",
+                   help="blob 落盘根（共享存储，跨机内容寻址共享；缺省=--dataset）")
     p.add_argument("--alias-cache", default=DEFAULT_ALIAS_CACHE)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--offset", type=int, default=0)
@@ -153,7 +156,7 @@ def main() -> None:
     stages = [
         seed.SeedStage(cache),
         search.SearchStage(args.top_n, args.k),
-        download.DownloadStage(args.dataset),
+        download.DownloadStage(args.blob_root or args.dataset),
         annotate.AnnotateSinkStage(sink, kb),
     ]
     concurrency = {

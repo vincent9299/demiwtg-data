@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PYSRC="https://pypi.tuna.tsinghua.edu.cn/simple"   # 国内源优先（AGENTS.md §7）
+PYSRC="${PYSRC:-https://pypi.tuna.tsinghua.edu.cn/simple}"   # 海外机可 PYSRC=https://pypi.org/simple
 
 # 1) 上游源码（浅克隆，不入 git）
 if [ ! -d searxng ]; then
