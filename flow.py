@@ -125,9 +125,6 @@ def main() -> None:
         insts = head + tail          # 稳定分区：0 图排队首、难啃实例沉底
     if args.shuffle is not None:
         random.Random(args.shuffle).shuffle(insts)
-    insts = insts[args.offset:]
-    if args.limit > 0:
-        insts = insts[:args.limit]
     manifest_name = "metadata.jsonl"
     alias_cache = args.alias_cache
     if args.shard:
@@ -136,12 +133,15 @@ def main() -> None:
             assert 0 <= i < n
         except Exception:
             raise SystemExit(f"--shard 需为 I/N 形式（收到 {args.shard!r}）")
-        insts = insts[i::n]                 # 输入分片：词表/闸门语义随分片正确
-        manifest_name = f"metadata-shard-{i}-of-{n}.jsonl"
-        alias_cache = f"{args.alias_cache}.shard{i}-of-{n}"
+        insts = insts[i::n]                 # 先切分片（词表/闸门语义随分片正确），
+        manifest_name = f"metadata-shard-{i}-of-{n}.jsonl"   # 后 offset/limit——
+        alias_cache = f"{args.alias_cache}.shard{i}-of-{n}"  # limit 语义=每分片
         search.scale_engine_limits(n)      # 限速预算等分：N 进程合计不超发
         print(f"[flow] 分片 {i}/{n}：实例切片后 {len(insts)}，"
               f"清单 {manifest_name}（限速预算已等分）", flush=True)
+    insts = insts[args.offset:]
+    if args.limit > 0:
+        insts = insts[:args.limit]
     print(f"[flow] 待消费实例 {len(insts)}（top_n={args.top_n} k={args.k}）", flush=True)
 
     cache = seed.SeedCache(alias_cache)
