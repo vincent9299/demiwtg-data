@@ -918,3 +918,20 @@ class SearchStage(StreamStage):
                             "author": r.get("author"),
                             "native": r.get("native") or {}})
         return out or None
+
+
+def scale_engine_limits(divisor: int) -> None:
+    """分片并行时按分片数等分限速/并发预算（2026-09-04·D2）。
+
+    全局限速语义保持：N 个分片进程各持 rate/N、concurrency/N，合计≈
+    原预算（防封禁口径不超发；静态划分无中心协调，分片数须固定）。
+    下限保护：rate>=0.1、concurrency>=1。须在引擎注册后、首次请求前
+    调用（flow --shard 启动期）。
+    """
+    if divisor <= 1:
+        return
+    from dataclasses import replace
+    scaled = {key: replace(lim, rate=max(0.1, lim.rate / divisor),
+                           concurrency=max(1, lim.concurrency // divisor))
+              for key, lim in net.SOURCE_LIMITS.items()}
+    net.register_limits(scaled)

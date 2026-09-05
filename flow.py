@@ -136,8 +136,9 @@ def main() -> None:
         insts = insts[i::n]                 # 输入分片：词表/闸门语义随分片正确
         manifest_name = f"metadata-shard-{i}-of-{n}.jsonl"
         alias_cache = f"{args.alias_cache}.shard{i}-of-{n}"
+        search.scale_engine_limits(n)      # 限速预算等分：N 进程合计不超发
         print(f"[flow] 分片 {i}/{n}：实例切片后 {len(insts)}，"
-              f"清单 {manifest_name}", flush=True)
+              f"清单 {manifest_name}（限速预算已等分）", flush=True)
     print(f"[flow] 待消费实例 {len(insts)}（top_n={args.top_n} k={args.k}）", flush=True)
 
     cache = seed.SeedCache(alias_cache)

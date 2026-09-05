@@ -1,17 +1,28 @@
-"""flow 守护：托管 flow 子进程，落盘停摆自动重启（2026-08-21 定案；2026-09-04·六 起托管目标由 chain 换为 flow，看门狗语义不变）。
+"""flow 守护：托管 flow 子进程（单进程或分片多进程），停摆自动重启
+（2026-08-21 定案；2026-09-04·D2 升级分片并行托管）。
 
 背景：旧链一夜三次静默停摆（HTTP 连接池半读连接复用死锁，
 net.get_client 已禁 keep-alive 缓解，但不保证根绝）。停摆特征是
 「进程活着、CPU 近零、清单不再增长」，无人值守时只能靠重启恢复；
 --skip-covered 保证重启续跑无损，故自愈代价仅一个启动周期。
 
-职责边界：只做「看门狗」——拉起 flow、盯清单行数、停摆则 kill+重拉；
+D2 分片形态（--shards N）：
+- 每分片一个 flow 子进程（自动追加 --shard i/N）：输入切片、各自
+  单写者清单（metadata-shard-i-of-N.jsonl）、各自分片词表与日志；
+- 限速预算由 flow 侧按分片数等分（scale_engine_limits），N 进程
+  合计不超发；
+- 停摆判定按各分片自己的清单行数，独立重启互不影响；
+- 跑完用 merge_shards.py 合并分片清单。
+
+职责边界：只做「看门狗」——拉起、盯清单行数、停摆则 kill+重拉；
 不做任何数据处理，flow 的全部参数原样透传。
 
-用法（与 flow 相同参数，前面可加守护参数）：
-    python3 -m supervise [--stall-minutes 12] [--flow-log logs/flow_x.log] \
-        -- --top-n 2 --vlm-concurrency 48 ... --instances state/collect/xxx.json
+用法：
+    python3 -m supervise -- --top-n 2                     # 单进程（同旧）
+    python3 -m supervise --shards 3 -- --skip-covered 8   # 3 分片并行
 """
+
+from __future__ import annotations
 
 import argparse
 import os
@@ -21,6 +32,7 @@ import sys
 import time
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DATASET = os.path.join(REPO_ROOT, "datasets", "demiwtg")
 DEFAULT_MANIFEST = os.path.join(
     REPO_ROOT, "datasets", "demiwtg", "meta", "metadata.jsonl")
 
@@ -34,73 +46,106 @@ def manifest_lines(path: str) -> int:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="flow 停摆自愈守护")
+    p = argparse.ArgumentParser(description="flow 停摆自愈守护（含分片并行）")
     p.add_argument("--stall-minutes", type=int, default=12,
                    help="清单零增长超过该时长判定停摆并重启（默认 12）")
     p.add_argument("--check-seconds", type=int, default=60,
                    help="清单采样间隔（默认 60）")
-    p.add_argument("--manifest", default=DEFAULT_MANIFEST,
-                   help="被盯的清单文件（默认 demiwtg 湖 metadata.jsonl）")
+    p.add_argument("--dataset", default=DEFAULT_DATASET,
+                   help="分片清单推导根（默认 datasets/demiwtg）")
+    p.add_argument("--shards", type=int, default=1,
+                   help="分片并行数：每分片一个 flow 子进程（默认 1=单进程）")
     p.add_argument("--flow-log", "--chain-log", default=None,
-                   help="flow 子进程 stdout/stderr 追加目标（默认 logs/supervised_flow.log）")
+                   help="子进程日志（默认 logs/supervised_flow[_shardN].log）")
     p.add_argument("flow_args", nargs=argparse.REMAINDER,
-                   help="'--' 之后原样透传给 data_pipeline.flow")
+                   help="'--' 之后原样透传给 flow")
     args = p.parse_args()
 
     flow_args = [a for a in args.flow_args if a != "--"]
     if not flow_args:
         p.error("需要在 '--' 后给出 flow 的完整参数")
-    flow_log = args.flow_log or os.path.join(REPO_ROOT, "logs", "supervised_flow.log")
+    n = max(1, args.shards)
 
-    cmd = [sys.executable, "-m", "data_pipeline.flow", *flow_args]
-    logf = open(flow_log, "ab", buffering=0)
+    os.makedirs(os.path.join(REPO_ROOT, "logs"), exist_ok=True)
+    children: list[dict] = []
+    for i in range(n):
+        cmd = [sys.executable, "-m", "flow", *flow_args]
+        if n > 1:
+            cmd += ["--shard", f"{i}/{n}"]
+        manifest = (DEFAULT_MANIFEST if n == 1 else os.path.join(
+            args.dataset, "meta", f"metadata-shard-{i}-of-{n}.jsonl"))
+        log = args.flow_log or os.path.join(
+            REPO_ROOT, "logs",
+            "supervised_flow.log" if n == 1
+            else f"supervised_flow_shard{i}.log")
+        children.append({"idx": i, "cmd": cmd, "manifest": manifest,
+                         "log": log, "proc": None, "logf": None,
+                         "last_lines": 0, "last_growth": time.time(),
+                         "restarts": 0})
 
-    child: subprocess.Popen = None  # type: ignore
     shutting_down = False
 
     def _term(signum, frame):  # noqa: ANN001 - 信号回调固定签名
         nonlocal shutting_down
         shutting_down = True
-        print(f"[supervise] 收到信号 {signum}，带走子进程", flush=True)
-        if child and child.poll() is None:
-            child.terminate()
+        print(f"[supervise] 收到信号 {signum}，带走全部子进程", flush=True)
+        for c in children:
+            if c["proc"] and c["proc"].poll() is None:
+                c["proc"].terminate()
 
     signal.signal(signal.SIGTERM, _term)
     signal.signal(signal.SIGINT, _term)
 
-    print(f"[supervise] 守护启动：stall>{args.stall_minutes}min 重启；"
-          f"flow 日志 {flow_log}", flush=True)
-    restarts = 0
+    def _spawn(c: dict) -> None:
+        c["logf"] = open(c["log"], "ab", buffering=0)
+        c["proc"] = subprocess.Popen(c["cmd"], cwd=REPO_ROOT,
+                                     stdout=c["logf"],
+                                     stderr=subprocess.STDOUT)
+        c["last_lines"] = manifest_lines(c["manifest"])
+        c["last_growth"] = time.time()
+        print(f"[supervise] 分片{c['idx']} 已拉起 pid={c['proc'].pid}"
+              f"（第 {c['restarts']} 次重启；清单 {c['manifest']}）", flush=True)
+
+    print(f"[supervise] 守护启动：{n} 分片，stall>{args.stall_minutes}min 重启；"
+          f"参数 {flow_args}", flush=True)
+    for c in children:
+        _spawn(c)
+
     while not shutting_down:
-        child = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=logf,
-                                 stderr=subprocess.STDOUT)
-        print(f"[supervise] flow 已拉起 pid={child.pid}（第 {restarts} 次重启）",
-              flush=True)
-        last_lines = manifest_lines(args.manifest)
-        last_growth = time.time()
-        while not shutting_down:
-            time.sleep(args.check_seconds)
-            rc = child.poll()
+        time.sleep(args.check_seconds)
+        for c in children:
+            proc = c["proc"]
+            if proc is None:
+                continue
+            rc = proc.poll()
             if rc is not None:
-                print(f"[supervise] flow 自行退出 rc={rc}，5 秒后重拉", flush=True)
+                print(f"[supervise] 分片{c['idx']} 自行退出 rc={rc}，"
+                      f"5 秒后重拉", flush=True)
                 time.sleep(5)
-                break
-            lines = manifest_lines(args.manifest)
-            if lines > last_lines:
-                last_lines, last_growth = lines, time.time()
-            elif time.time() - last_growth > args.stall_minutes * 60:
-                print(f"[supervise] 清单 {args.stall_minutes} 分钟零增长"
-                      f"（停在 {last_lines} 行），判定停摆，kill 重拉", flush=True)
-                child.kill()
-                child.wait()
-                restarts += 1
-                break
-        else:
-            break
-    if child and child.poll() is None:
-        child.terminate()
-        child.wait()
-    print("[supervise] 退出", flush=True)
+                c["restarts"] += 1
+                _spawn(c)
+                continue
+            lines = manifest_lines(c["manifest"])
+            if lines > c["last_lines"]:
+                c["last_lines"], c["last_growth"] = lines, time.time()
+            elif time.time() - c["last_growth"] > args.stall_minutes * 60:
+                print(f"[supervise] 分片{c['idx']} 清单 "
+                      f"{args.stall_minutes} 分钟零增长"
+                      f"（停在 {c['last_lines']} 行），判定停摆，kill 重拉",
+                      flush=True)
+                proc.kill()
+                proc.wait()
+                c["restarts"] += 1
+                _spawn(c)
+
+    for c in children:
+        if c["proc"] and c["proc"].poll() is None:
+            c["proc"].terminate()
+            c["proc"].wait()
+        if c["logf"]:
+            c["logf"].close()
+    total_restarts = sum(c["restarts"] for c in children)
+    print(f"[supervise] 退出（累计重启 {total_restarts} 次）", flush=True)
 
 
 if __name__ == "__main__":
