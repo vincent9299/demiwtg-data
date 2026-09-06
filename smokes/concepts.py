@@ -96,7 +96,7 @@ def main() -> None:
         rows = load_concepts(cpath)[0]
         assert len(rows) == 3 and rows[0]["min_images"] == 40
         assert rows[1]["min_images"] == 10
-        assert sorted(rows[0].keys()) == ["aliases", "carriers", "min_images", "name"]
+        assert sorted(rows[0].keys()) == ["aliases", "carriers", "min_images", "name", "taxonomy"]
         seeds = asyncio.run(ConceptSeedStage()(rows[0]))
         assert [s["lang"] for s in seeds] == ["zh", "latin", "zh"]   # 名+双别名
         assert seeds[0]["top_n_hint"] == 2
