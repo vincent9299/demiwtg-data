@@ -48,7 +48,9 @@ def card(row: dict, img_url: str) -> str:
         links.append(f'<a href="{esc(row["content_url"])}">源图</a>')
     if row.get("landing_url"):
         links.append(f'<a href="{esc(row["landing_url"])}">来源页</a>')
-    return (f'<div class="card"><img loading="lazy" src="{img_url}">'
+    href = img_url.split("&w=")[0] if "&w=" in img_url else img_url
+    return (f'<div class="card"><a href="{href}" target="_blank">'
+            f'<img loading="lazy" src="{img_url}"></a>'
             f'<div class="meta"><b>{esc(row.get("source"))}</b> · {esc(query)}<br>'
             f'{row.get("width")}×{row.get("height")} · '
             f'{int(row.get("size_bytes") or 0) // 1024}KB · '
