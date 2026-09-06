@@ -41,9 +41,11 @@ class WikiEntityEngine:
         k = min(k, self.k_cap)
         base = (f"https://zh.wikipedia.org" if lang == "zh"
                 else "https://en.wikipedia.org")
+        from operators.search import API_UA
         resp = await net.request(
             self.name, "GET", base + self._SEARCH, client=client,
-            params={"q": query, "limit": str(k)})
+            params={"q": query, "limit": str(k)},
+            headers={"User-Agent": API_UA})
         out = []
         for p in (resp.json().get("pages") or [])[:k]:
             key = p.get("key")
@@ -77,7 +79,7 @@ class SearxngGeneralEngine:
             self.name, "GET", self._API, client=client,
             params={"q": query, "categories": "general", "format": "json",
                     "language": "zh-CN" if lang == "zh" else "en",
-                    "safesearch": 1})
+                    "safesearch": 1, "engines": "google, bing"})
         out = []
         for r in (resp.json().get("results") or [])[:k]:
             url = r.get("url")

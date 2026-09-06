@@ -1,7 +1,9 @@
 """data_pipeline 概念批任务算子：概念三字段模型（2026-09-06 定案）。
 
 模型契约：
-- 概念行（registry 真相）：{name, aliases[], carriers} —— 仅此三字段；
+- 概念行（registry 真相）：{name, aliases[], carriers, taxonomy[]?} ——
+  核心三字段 + taxonomy 补充字段（2026-09-06 增：体系路径，可多条，
+  体系归属/溯源/策展用，检索链路不消费）；
   name 正名主键定了不改（收词不收算式）；aliases 身份归一（判重/外文
   路由/叫法归一）；carriers 产物形式（image/text/image+text）；
 - ⛔ 概念行里没有知识文本——知识在 docs 层（pages/docs.jsonl）；
@@ -52,6 +54,7 @@ def _load_v3(doc: dict) -> tuple:
             "name": name,
             "aliases": [a for a in (c.get("aliases") or []) if str(a).strip()],
             "carriers": c.get("carriers") or "image+text",
+            "taxonomy": [t for t in (c.get("taxonomy") or []) if str(t).strip()],
             "min_images": int(per.get(name, default_q) or default_q),
         })
     return rows, plan
@@ -73,6 +76,7 @@ def _load_v2(doc: dict) -> tuple:
             "name": name,
             "aliases": [a for a in (c.get("aliases") or []) if str(a).strip()],
             "carriers": c.get("carriers") or "image+text",
+            "taxonomy": [t for t in (c.get("taxonomy") or []) if str(t).strip()],
             "min_images": int(quota or 20),
         })
     return rows, {}

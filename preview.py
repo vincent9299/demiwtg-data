@@ -48,6 +48,16 @@ h2 span{color:#888;font-weight:normal;margin-left:8px;font-size:12px}
 .card img{width:250px;height:187px;object-fit:cover;display:block;background:#eee}
 .meta{padding:6px 8px;font-size:11px;color:#555}
 a{color:#06c;text-decoration:none}
+.badge{font-size:10px;padding:1px 7px;border-radius:8px;color:#fff;
+margin-right:6px;vertical-align:2px}
+.b-wiki{background:#5b8def}.b-serp{background:#8a8a8a}
+.b-curated{background:#4caf50}
+.doc-card{background:#fff;border:1px solid #e5e5e5;border-radius:8px;
+padding:10px 12px;margin:8px 0;max-width:880px}
+.passage{border-top:1px dashed #eee;margin-top:8px;padding-top:8px}
+.passage p{margin:0 0 6px;font-size:12px;color:#333;white-space:pre-wrap}
+.pimgs{display:flex;gap:6px;flex-wrap:wrap}
+.pimgs img{width:200px;height:140px;object-fit:cover;border-radius:6px}
 pre.doc{background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:12px;
 white-space:pre-wrap;max-width:860px;font-size:12px}
 """
@@ -117,7 +127,8 @@ def run_serve(args) -> None:
     manifest_glob = os.path.join(meta_dir, args.manifest)
     if not _glob.glob(manifest_glob):
         raise SystemExit(f"清单不存在：{manifest_glob}")
-    docs_glob = os.path.join(meta_dir, "docs.jsonl")
+    docs_glob = os.path.join(meta_dir, args.docs_manifest)
+    has_docs = bool(_glob.glob(docs_glob))
     quota = load_quota()
     root = args.blob_root or args.dataset   # blob/pages 解析根（共享存储）
 
@@ -212,10 +223,12 @@ def run_serve(args) -> None:
                          GROUP BY source ORDER BY 2 DESC""", tuple(params))
             tgt = quota.get(name)
             docs = []
-            if os.path.exists(docs_glob):
-                docs = q(f"""SELECT url, path FROM
-                             read_json_auto('{docs_glob}')
-                             WHERE list_contains(concepts, ?)""", (name,))
+            if has_docs:
+                docs = q(f"""SELECT url, path, authority, title, n_images
+                             FROM read_json_auto('{docs_glob}')
+                             WHERE list_contains(concepts, ?)
+                             ORDER BY (authority='wiki') DESC, url""",
+                         (name,))
             cards = "\n".join(
                 card(r, f"/blob?path={esc(r.get('path') or '')}&w=280")
                 for r in recs)
@@ -225,11 +238,40 @@ def run_serve(args) -> None:
             ann_n = sum(1 for r in recs if r.get("quality") is not None)
             docs_html = ""
             if docs:
-                items = "".join(
-                    f'<li>{esc(u or "curated")} <a href="/page?path='
-                    f'{esc(pp)}">正文</a></li>' for u, pp in docs)
-                docs_html = (f"<h2>知识文档<span>{len(docs)} 篇</span></h2>"
-                             f"<ul>{items}</ul>")
+                from operators.page import extract_passages
+                items = []
+                for url, path, authority, title, n_imgs in docs:
+                    full_md = os.path.join(root, path or "")
+                    passages = []
+                    if path and os.path.exists(full_md):
+                        passages = extract_passages(
+                            open(full_md, encoding="utf-8",
+                                 errors="replace").read())
+                    badge = (f'<span class="badge b-{esc(authority)}">'
+                             f"{esc(authority)}</span>")
+                    segs = []
+                    for pa in passages:
+                        imgs = "".join(
+                            f'<a href="/blob?path={esc(im.get("blob_path"))}"'
+                            f' target="_blank"><img loading="lazy" src='
+                            f'"/blob?path={esc(im.get("blob_path"))}&w=200">'
+                            f"</a>"
+                            for im in pa.get("images") or []
+                            if im.get("blob_path"))
+                        segs.append(
+                            f'<div class="passage"><p>{esc(pa["text"])}</p>'
+                            + (f'<div class="pimgs">{imgs}</div>' if imgs
+                               else "") + "</div>")
+                    items.append(
+                        f'<div class="doc-card">{badge} '
+                        f'<b>{esc(title or url)}</b> '
+                        f'<a href="{esc(url)}">原文</a> · '
+                        f'{len(passages)} 段 / {n_imgs} 图'
+                        + ("".join(segs) if segs else
+                           '<p style="color:#999">（正文读取失败）</p>')
+                        + "</div>")
+                docs_html = (f"<h2>知识文档<span>{len(docs)} 篇"
+                             f"</span></h2>" + "".join(items))
             head = (f'<a href="/">← 概念列表</a><h2>{esc(name)}<span>'
                     f'{len(recs)} 张' + (f" · 目标 {tgt}" if tgt else "")
                     + f' · 已标注 {ann_n}</span></h2>'
@@ -342,7 +384,9 @@ def main() -> None:
     sp = sub.add_parser("serve")
     sp.add_argument("--dataset", default=DEFAULT_DATASET)
     sp.add_argument("--manifest", default="image*.jsonl",
-                    help="清单 glob（默认分片+合并件全量）")
+                    help="图像清单 glob（默认分片+合并件全量）")
+    sp.add_argument("--docs-manifest", default="docs*.jsonl",
+                    help="docs 清单 glob（默认 docs*.jsonl）")
     sp.add_argument("--blob-root", default="",
                     help="blob/页面根（共享存储；缺省=--dataset）")
     sp.add_argument("--port", type=int, default=8901)
