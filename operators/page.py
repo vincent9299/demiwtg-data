@@ -132,6 +132,53 @@ async def _wiki_extract(url: str):
     return None
 
 
+def quality_gate(passages: list):
+    """共享质量门（在线采集与离线导入同款）。
+
+    壳页判定双通道：有效段落 >=2；或单段但净文本 >=150 字（中文致密
+    段落合并后常为一段——总文本量达标的单段知识页不误杀）。
+    """
+    if len(passages) >= 2:
+        return passages
+    if len(passages) == 1 and len(passages[0]["text"]) >= 150:
+        return passages
+    return None
+
+
+class BaseIngestStage(StreamStage):
+    """离线/外部文本导入算子：{concepts, title, url, text} 行 → docs 落盘行。
+
+    与在线采集复用同一段抽取-过滤-质量门链路（extract_passages 的链密度
+    过滤/垃圾图过滤 + quality_gate 壳页门）——base 层（wikipedia dump 等）
+    与 delta 层（在线采集）经过完全相同的清洗，落到同一张 docs 清单、
+    同一 pages/ 内容寻址池，authority 溯源区分来源。
+    """
+
+    label = "base_ingest"
+    concurrency = 8
+
+    def __init__(self, store_root: str):
+        self.root = store_root
+
+    async def __call__(self, row: dict):
+        import hashlib as _h
+        url = row.get("url") or f"offline:{row.get('title', '')}"
+        sha = _h.sha256(url.encode("utf-8")).hexdigest()
+        md_path = os.path.join(self.root, "pages", sha[:2], f"{sha}.md")
+        if not os.path.exists(md_path):
+            await asyncio.to_thread(
+                atomic_write_bytes, md_path,
+                row["text"].encode("utf-8"))
+        passages = quality_gate(extract_passages(row["text"]))
+        if passages is None:
+            return None
+        return {**row, "page_sha": sha,
+                "passages": passages,
+                "path": f"pages/{sha[:2]}/{sha}.md",
+                "authority": row.get("authority", "offline-dump"),
+                "n_images": sum(len(p["images"]) for p in passages)}
+
+
 class PageFetchStage(StreamStage):
     """页面抓取算子（图文一体）：候选行 → 页面产物行。
 
@@ -184,8 +231,8 @@ class PageFetchStage(StreamStage):
             await asyncio.to_thread(atomic_write_bytes, md_path,
                                     markdown.encode("utf-8"))
             self.pages += 1
-        passages = extract_passages(markdown)
-        if len(passages) < 2:
+        passages = quality_gate(extract_passages(markdown))
+        if passages is None:
             return None               # 壳页质量门：导航/空壳/登录墙拒收
         self._fetched[concept] = self._fetched.get(concept, 0) + 1
         n_imgs = sum(len(p["images"]) for p in passages)
@@ -286,7 +333,8 @@ class DocsSinkStage(StreamStage):
             return None
         record = {
             "page_sha": sha, "url": row.get("page_url"),
-            "concepts": [row["name"]], "authority": row.get("authority"),
+            "concepts": row.get("concepts") or [row["name"]],
+            "authority": row.get("authority"),
             "title": row.get("title"), "path": row.get("path"),
             "n_passages": len(row.get("passages") or []),
             "n_images": sum(len(p.get("images") or [])
@@ -295,7 +343,8 @@ class DocsSinkStage(StreamStage):
         }
         done = await self._store.write(
             data=b"", blob_path=os.path.join(self.root_dir, row.get("path") or ""),
-            key=(sha, row["name"]), record=record)
+            key=(sha, ",".join(row.get("concepts") or [row.get("name", "")])),
+            record=record)
         if done:
             self.sunk += 1
             return row
