@@ -106,10 +106,50 @@ TEXT_ROUTE_TABLE = {
 import re  # noqa: E402 （WikiEntityEngine 的 snippet 清洗用）
 
 
-class TextSearchStage(StreamStage):
-    """文本检索算子：种子行 → 页面候选行集（每 (种子,引擎) 取 top_n 页）。
+_DISAMBIG_MARKS = ("可以指", "可以是指", "消歧义", "disambiguation")
+_TRUSTED_URL = ("wikipedia.org", "baike.baidu.com", "zhihu.com",
+                "britannica.com")
 
-    页级预算由下游 PageFetchStage 按概念计数控制；本级只扇出候选。
+
+def relevance_score(cand: dict, name: str, aliases: list) -> int:
+    """候选页相关性打分（2026-09-06：SERP 词面混入治理）。
+
+    - 标题精确=概念名 100 / 概念名为标题子串 70 / 别名子串 55；
+    - 西文词重叠（≥3 字母词）每词 +6；
+    - 权威站 +8；消歧义页（snippet/标题含消歧标记）-40（非目标知识，
+      有更优候选时按排序自然沉底）；
+    - 阈值 <18 丢弃（实测：词典/摄影类词面页 6 分、材质母类页 20 分留）。
+    """
+    title = (cand.get("title") or "").strip()
+    score = 0
+    if title == name:
+        score = 100
+    elif name in title:
+        score = 70
+    else:
+        for a in aliases or []:
+            a = (a or "").strip()
+            if a and a in title:
+                score = max(score, 55)
+                break
+    toks = set(re.findall(r"[a-z]{3,}", title.lower()))
+    want = set(re.findall(r"[a-z]{3,}",
+                          (name + " " + " ".join(aliases or [])).lower()))
+    score += 6 * len(toks & want)
+    if any(d in cand.get("page_url", "") for d in _TRUSTED_URL):
+        score += 8
+    if any(m in (cand.get("snippet") or "") for m in _DISAMBIG_MARKS) \
+            or "消歧义" in title:
+        score -= 40
+    return score
+
+
+class TextSearchStage(StreamStage):
+    """文本检索算子：种子行 → 页面候选行集（相关性过滤 + 打分排序）。
+
+    每 (种子,引擎) 取 top_n 页后做概念相关性过滤（词面混入治理：
+    词典/无关行业页丢弃），按分数降序输出；消歧义页降权沉底。
+    页级预算由下游 PageFetchStage 按概念计数控制。
     """
 
     label = "text_search"
@@ -117,11 +157,16 @@ class TextSearchStage(StreamStage):
     queue_depth = 48
     catch = (net.InfraError, httpx.HTTPError)
 
-    def __init__(self, per_query: int = 2):
+    def __init__(self, per_query: int = 2, *, aliases_by_name: dict = None,
+                 min_score: int = 18):
         self.per_query = per_query
+        self._aliases = aliases_by_name or {}
+        self.min_score = min_score
 
     async def __call__(self, seed: dict):
         from demiflow.collect.search import engine_search
+        name = seed["name"]
+        aliases = self._aliases.get(name, [])
         results = await asyncio.gather(*(
             engine_search(s, seed.get("query") or seed["name"], self.per_query,
                           lang=seed.get("lang", "zh"))
@@ -138,6 +183,10 @@ class TextSearchStage(StreamStage):
                 if u in seen:
                     continue
                 seen.add(u)
-                out.append({**r, "name": seed["name"],
+                s = relevance_score(r, name, aliases)
+                if s < self.min_score:
+                    continue
+                out.append({**r, "name": name, "score": s,
                             "query": seed.get("query") or seed["name"]})
+        out.sort(key=lambda r: -r["score"])
         return out or None

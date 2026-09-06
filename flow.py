@@ -34,6 +34,7 @@ DEFAULT_ALIAS_CACHE = os.path.join(REPO_ROOT, "datasets", "demiwtg", "meta", "al
 from operators import annotate, download, search, seed
 from demiflow.collect.llm import reconfigure_endpoint
 from demiflow.collect.resume import scan_counts
+from demiflow.data.plan import StreamStage
 from demiflow.standalone import local_data, run_stages
 
 SAVE_EVERY = 100           # 词表每 N 实例落盘（断点续跑第三层）
@@ -250,23 +251,52 @@ def main() -> None:
             docs_name = (f"docs-shard-{shard_tag}.jsonl" if shard_tag
                          else "docs.jsonl")
             share = args.blob_root or args.dataset
-            t_stages = [
-                ConceptSeedStage(),
-                TextSearchStage(per_query=2),
-                PageFetchStage(share),
-                InlineImageStage(share),
-                DocsSinkStage(args.dataset, docs_name),
-            ]
+            aliases_map = {c["name"]: c["aliases"] for c in all_rows}
+
+            def _docs_run(rows, seed_stage=None):
+                st = [seed_stage or ConceptSeedStage(),
+                      TextSearchStage(per_query=2, aliases_by_name=aliases_map),
+                      PageFetchStage(share),
+                      InlineImageStage(share),
+                      DocsSinkStage(args.dataset, docs_name)]
+                stats = run_stages(local_data(), rows, st,
+                                   concurrency={
+                                       "seed": (8, 32),
+                                       "text_search": (8, 48),
+                                       "pages": (4, 8),
+                                       "inline": (8, 16),
+                                       "docs_sink": (4, None),
+                                   }, log_every=args.log_every)
+                return st, stats
+
             print(f"[flow] docs 线启动：{len(text_rows)} 概念（含 text-only），"
                   f"清单 {docs_name}", flush=True)
-            t_stats = run_stages(local_data(), text_rows, t_stages,
-                                 concurrency={
-                                     "seed": (8, 32),
-                                     "text_search": (8, 48),
-                                     "pages": (4, 8),
-                                     "inline": (8, 16),
-                                     "docs_sink": (4, None),
-                                 }, log_every=args.log_every)
+            t_stages, t_stats = _docs_run(text_rows)
+
+            # 二轮递归补检：高相关文档不足的概念用扩展词（百科/介绍）
+            # 再检索一轮——SERP 检索式补广，与首轮幂等去重
+            from operators.concepts import concept_coverage
+            docs_path = os.path.join(args.dataset, "meta", docs_name)
+            cov = concept_coverage(docs_path,
+                                   {c["name"] for c in text_rows})
+            under = [c for c in text_rows if cov[c["name"]] < 2]
+            if under:
+                exp_rows = []
+                for c in under:
+                    exp_rows += [{"name": c["name"], "query": f"{c['name']} 百科",
+                                  "lang": "zh", "top_n_hint": 2},
+                                 {"name": c["name"], "query": f"{c['name']} 介绍",
+                                  "lang": "zh", "top_n_hint": 2}]
+                class _ExpandSeeds(StreamStage):
+                    label = "seed"
+                    concurrency = 8
+
+                    async def __call__(self, row):
+                        return [row]
+
+                print(f"[flow] docs 二轮补检：{len(under)} 概念文档不足"
+                      f"（<2），扩展词重检", flush=True)
+                t_stages, t_stats = _docs_run(exp_rows, _ExpandSeeds())
             print(f"[flow] docs 线完成：新页 {t_stages[2].pages} 张、"
                   f"落 docs {t_stages[4].sunk} 行；"
                   f"引擎口径：{t_stats.summary()}", flush=True)
