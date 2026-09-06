@@ -129,7 +129,17 @@ def relevance_score(cand: dict, name: str, aliases: list) -> int:
     else:
         for a in aliases or []:
             a = (a or "").strip()
-            if a and a in title:
+            if not a:
+                continue
+            # 短西文别名（<5 字母）子串匹配太松（"Bolt"→"Ride with
+            # Bolt" 出租车页混入螺栓概念）——短词只认标题词级命中：
+            # 词边界整词出现才给分，且分值降到 40（长尾词面风险）
+            if re.fullmatch(r"[A-Za-z0-9 .\-]+", a) and len(a.replace(" ", "")) < 5:
+                if re.search(rf"\b{re.escape(a)}\b", title, re.IGNORECASE):
+                    score = max(score, 40)
+                    break
+                continue
+            if a in title:
                 score = max(score, 55)
                 break
     toks = set(re.findall(r"[a-z]{3,}", title.lower()))
