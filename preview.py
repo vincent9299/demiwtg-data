@@ -176,7 +176,17 @@ def run_serve(args) -> None:
                         count(DISTINCT source) AS s,
                         sum(CASE WHEN quality IS NOT NULL THEN 1 ELSE 0 END)
                         FROM read_json_auto('{manifest_glob}') {cond}
-                        GROUP BY c ORDER BY n DESC, c""", params)
+                        GROUP BY c""", params)
+            docs_cnt = {}
+            if has_docs:
+                for c, n in q(f"""SELECT concepts[1] AS c, count(*) FROM
+                              read_json_auto('{docs_glob}') {cond}
+                              GROUP BY c""", params):
+                    docs_cnt[c] = n
+                for c in list(docs_cnt):
+                    if not any(r[0] == c for r in rows):
+                        rows.append((c, 0, 0, 0))      # text-only 概念补位
+            rows.sort(key=lambda r: (-docs_cnt.get(r[0], 0) - r[1], r[0]))
             body = [('<form>概念 <input name="q" value="' + esc(kw)
                      + '" size="12"><button>检索</button> <a href="/">全部</a>'
                      '　<small>点击概念进入图墙</small></form>')]
@@ -197,9 +207,10 @@ def run_serve(args) -> None:
                     shown = str(n)
                 trs.append(f"<tr><td><a href='/concept?name={quote(c)}'>"
                            f"{esc(c)}</a></td><td>{shown}</td>"
+                           f"<td>{docs_cnt.get(c, 0)}</td>"
                            f"<td>{srcs}</td><td>{ann or 0}</td></tr>")
-            body.append("<table><tr><th>概念</th><th>已采/目标</th>"
-                        "<th>来源数</th><th>已标注</th></tr>"
+            body.append("<table><tr><th>概念</th><th>图 已采/目标</th>"
+                        "<th>docs</th><th>图源数</th><th>已标注</th></tr>"
                         + "".join(trs) + "</table>")
             self._send(page_html("".join(body), "· 概念列表").encode(),
                        "text/html; charset=utf-8")
@@ -218,9 +229,12 @@ def run_serve(args) -> None:
             cols = [d[0] for d in q(
                 f"DESCRIBE SELECT * FROM read_json_auto('{manifest_glob}')")]
             recs = [dict(zip(cols, r)) for r in rows]
-            src_stats = q(f"""SELECT source, count(*) FROM
-                         read_json_auto('{manifest_glob}') WHERE {where}
-                         GROUP BY source ORDER BY 2 DESC""", tuple(params))
+            try:
+                src_stats = q(f"""SELECT source, count(*) FROM
+                             read_json_auto('{manifest_glob}') WHERE {where}
+                             GROUP BY source ORDER BY 2 DESC""", tuple(params))
+            except Exception:  # noqa: BLE001 - 无图像概念
+                src_stats = []
             tgt = quota.get(name)
             docs = []
             if has_docs:
@@ -273,7 +287,7 @@ def run_serve(args) -> None:
                 docs_html = (f"<h2>知识文档<span>{len(docs)} 篇"
                              f"</span></h2>" + "".join(items))
             head = (f'<a href="/">← 概念列表</a><h2>{esc(name)}<span>'
-                    f'{len(recs)} 张' + (f" · 目标 {tgt}" if tgt else "")
+                    f'图 {len(recs)} 张' + (f" · 目标 {tgt}" if tgt else "")
                     + f' · 已标注 {ann_n}</span></h2>'
                     f'<p style="font-size:12px;color:#666">来源：{src_links}</p>')
             self._send(page_html(head + docs_html
