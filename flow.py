@@ -235,6 +235,42 @@ def main() -> None:
             if not under:
                 break
             engine_stats = _run_once(under)
+    # ------------------------------------------------------------------
+    # docs 线（概念模式）：页面图文一体采集（carriers != image 的概念）
+    # ------------------------------------------------------------------
+    if concept_mode:
+        text_rows = [c for c in all_rows if c["carriers"] != "image"]
+        if text_rows:
+            from operators.concepts import ConceptSeedStage
+            from operators.page import (DocsSinkStage, InlineImageStage,
+                                        PageFetchStage)
+            from operators.text_engines import TextSearchStage
+            shard_tag = (f"{args.shard.replace('/', '-of-')}"
+                         if args.shard else "")
+            docs_name = (f"docs-shard-{shard_tag}.jsonl" if shard_tag
+                         else "docs.jsonl")
+            share = args.blob_root or args.dataset
+            t_stages = [
+                ConceptSeedStage(),
+                TextSearchStage(per_query=2),
+                PageFetchStage(share),
+                InlineImageStage(share),
+                DocsSinkStage(args.dataset, docs_name),
+            ]
+            print(f"[flow] docs 线启动：{len(text_rows)} 概念（含 text-only），"
+                  f"清单 {docs_name}", flush=True)
+            t_stats = run_stages(local_data(), text_rows, t_stages,
+                                 concurrency={
+                                     "seed": (8, 32),
+                                     "text_search": (8, 48),
+                                     "pages": (4, 8),
+                                     "inline": (8, 16),
+                                     "docs_sink": (4, None),
+                                 }, log_every=args.log_every)
+            print(f"[flow] docs 线完成：新页 {t_stages[2].pages} 张、"
+                  f"落 docs {t_stages[4].sunk} 行；"
+                  f"引擎口径：{t_stats.summary()}", flush=True)
+
     elapsed = time.time() - t0
     print(f"[flow] 完成，耗时 {elapsed/60:.1f} 分钟")
     print(f"[flow] 落盘 {engine_stats.emitted} 行；"

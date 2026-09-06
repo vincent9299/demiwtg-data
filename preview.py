@@ -1,18 +1,16 @@
-"""采集结果活预览：本机 HTTP 服务，DuckDB 实时过滤 + 缩略图按需渲染。
+"""采集湖预览：概念列表 → 概念详情（图墙/原图/知识文档）→ 文档正文。
 
-不用拷数据：浏览器直连（推荐 SSH 隧道），刷新即见湖的最新状态。
+serve 模式（默认）：本机 HTTP 服务，DuckDB 实时过滤，免拷数据。
+export 模式：离线自包含单文件（无网络场景备用）。
 
 用法：
-    python3 preview.py serve [--port 8901] [--bind 127.0.0.1]   # 默认
-    python3 preview.py export [--out preview.html] [--limit 200] # 离线单文件（旧形态）
+    python3 preview.py serve [--dataset DIR] [--manifest 'image*.jsonl']
+                             [--port 8901] [--bind 127.0.0.1]
+    python3 preview.py export [--out preview.html] [--limit 200]
 
 笔记本访问（免开防火墙）：
-    ssh -N -L 8901:localhost:8901 ubuntu@43.160.250.196
+    ssh -N -L 8901:localhost:8901 ubuntu@<机器>
     浏览器打开 http://localhost:8901
-（或在安全组放行端口后 --bind 0.0.0.0 直连公网 IP）
-
-过滤参数（URL 查询串，页面表单同款）：instance= / source= / min_q= /
-limit=（默认 100）。
 """
 
 from __future__ import annotations
@@ -25,24 +23,52 @@ import json
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATASET = "/lhcos-data/demiwtg-data/datasets/demiwtg"
+# 配额表来源（在场则列表页展示 目标张数/进度条）
+BATCH_PATH = "/lhcos-data/demiwtg-data/concepts_batch_200.json"
 
+_CSS = """body{font:13px/1.5 -apple-system,sans-serif;margin:16px;background:#fafafa}
+form{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 12px;align-items:center}
+input{font:inherit;padding:3px 6px;border:1px solid #ccc;border-radius:5px}
+button{padding:4px 12px;cursor:pointer}
+#stats{color:#666;margin:4px 0 12px;font-size:12px}
+table{border-collapse:collapse;background:#fff}
+td,th{border:1px solid #eee;padding:5px 10px;text-align:left;font-size:12px}
+.bar{background:#eee;border-radius:4px;width:120px;height:10px;overflow:hidden;
+display:inline-block;vertical-align:middle;margin-right:6px}
+.bar i{display:block;height:100%;background:#5b8def}
+.ok i{background:#4caf50}
+h2{font-size:15px;margin:20px 0 8px}
+h2 span{color:#888;font-weight:normal;margin-left:8px;font-size:12px}
+.grid{display:flex;flex-wrap:wrap;gap:10px}
+.card{background:#fff;border:1px solid #e5e5e5;border-radius:8px;overflow:hidden;width:250px}
+.card img{width:250px;height:187px;object-fit:cover;display:block;background:#eee}
+.meta{padding:6px 8px;font-size:11px;color:#555}
+a{color:#06c;text-decoration:none}
+pre.doc{background:#fff;border:1px solid #e5e5e5;border-radius:8px;padding:12px;
+white-space:pre-wrap;max-width:860px;font-size:12px}
+"""
 
-# ---------------------------------------------------------------------------
-# 行渲染（serve 与 export 共用）
-# ---------------------------------------------------------------------------
 
 def esc(x) -> str:
     return html.escape(str(x if x is not None else "—"))
 
 
+def page_html(body: str, subtitle: str = "") -> str:
+    return (f'<!doctype html><html><head><meta charset="utf-8">'
+            f'<title>采集湖预览</title><style>{_CSS}</style></head><body>'
+            f'<h1>采集湖预览 <span style="font-size:12px;color:#888">'
+            f'{esc(subtitle)}</span></h1>{body}</body></html>')
+
+
 def card(row: dict, img_url: str) -> str:
     q = row.get("quality")
     ann = f"q={q:g} kb={row.get('kb_match')}" if q is not None else "未标注"
-    query = (row.get("queries") or {}).get(row["instances"][0], "")
+    name = (row.get("concepts") or [row.get("name")])[0]
+    query = (row.get("queries") or {}).get(name, "")
     links = []
     if row.get("content_url"):
         links.append(f'<a href="{esc(row["content_url"])}">源图</a>')
@@ -58,39 +84,6 @@ def card(row: dict, img_url: str) -> str:
             f'{ann} · {" ".join(links)}</div></div>')
 
 
-PAGE = '''<!doctype html><html><head><meta charset="utf-8">
-<title>采集湖预览</title><style>
-body{{font:13px/1.5 -apple-system,sans-serif;margin:16px;background:#fafafa}}
-form{{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 4px;align-items:center}}
-input,select{{font:inherit;padding:3px 6px;border:1px solid #ccc;border-radius:5px}}
-button{{padding:4px 12px;cursor:pointer}}
-#stats{{color:#666;margin:4px 0 12px;font-size:12px}}
-h2{{font-size:15px;margin:20px 0 8px}}
-h2 span{{color:#888;font-weight:normal;margin-left:8px;font-size:12px}}
-.grid{{display:flex;flex-wrap:wrap;gap:10px}}
-.card{{background:#fff;border:1px solid #e5e5e5;border-radius:8px;overflow:hidden;
-width:250px}}
-.card img{{width:250px;height:187px;object-fit:cover;display:block;background:#eee}}
-.meta{{padding:6px 8px;font-size:11px;color:#555}}
-a{{color:#06c;text-decoration:none}}
-</style></head><body>
-<h1>采集湖预览</h1>
-<form method="get">
-实例 <input name="instance" value="{instance}" size="10" placeholder="包含匹配">
-来源 <input name="source" value="{source}" size="9" placeholder="如 baidu">
-min_q <input name="min_q" value="{min_q}" size="4">
-行数 <input name="limit" value="{limit}" size="4">
-<button>过滤</button> <a href="/">重置</a>
-</form>
-<div id="stats">{stats}</div>
-{sections}
-</body></html>'''
-
-
-# ---------------------------------------------------------------------------
-# serve 模式：DuckDB 实时过滤 + 缩略图端点
-# ---------------------------------------------------------------------------
-
 def thumb_jpeg(blob_path: str, max_edge: int = 300):
     from PIL import Image
     with Image.open(blob_path) as im:
@@ -101,11 +94,33 @@ def thumb_jpeg(blob_path: str, max_edge: int = 300):
         return buf.getvalue()
 
 
+def load_quota() -> dict:
+    """批任务在场则取 {概念: 目标张数}（gate 兜底口径）。"""
+    try:
+        doc = json.load(open(BATCH_PATH, encoding="utf-8"))
+    except OSError:
+        return {}
+    qmap = {"strict": 40, "category": 20, "relevance": 10}
+    out = {}
+    for c in doc.get("concepts") or []:
+        gate = c.get("gate") or "category"
+        out[c["name"]] = int((c.get("collect") or {}).get(
+            "min_images", qmap.get(gate, 20)) or 20)
+    return out
+
+
 def run_serve(args) -> None:
+    import glob as _glob
     import duckdb
-    manifest = os.path.join(args.dataset, "meta", args.manifest)
-    if not os.path.exists(manifest):
-        raise SystemExit(f"清单不存在：{manifest}")
+
+    meta_dir = os.path.join(args.dataset, "meta")
+    manifest_glob = os.path.join(meta_dir, args.manifest)
+    if not _glob.glob(manifest_glob):
+        raise SystemExit(f"清单不存在：{manifest_glob}")
+    docs_glob = os.path.join(meta_dir, "docs.jsonl")
+    quota = load_quota()
+    root = args.blob_root or args.dataset   # blob/pages 解析根（共享存储）
+
     lock = threading.Lock()
     con = duckdb.connect()
 
@@ -113,22 +128,8 @@ def run_serve(args) -> None:
         with lock:
             return con.execute(sql, params).fetchall()
 
-    def rows_where(p) -> tuple:
-        conds, params = ["1=1"], []
-        if p.get("instance"):
-            conds.append("list_contains(instances, ?)")
-            params.append(f"%{p['instance'][0]}%")
-        if p.get("source"):
-            conds.append("source = ?")
-            params.append(p["source"][0])
-        if p.get("min_q"):
-            conds.append("quality >= ?")
-            params.append(float(p["min_q"][0]))
-        limit = min(int(p.get("limit", ["100"])[0] or 100), 2000)
-        return " AND ".join(conds), tuple(params), limit
-
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):  # 静默访问日志
+        def log_message(self, *a):
             pass
 
         def do_GET(self):
@@ -136,75 +137,138 @@ def run_serve(args) -> None:
             p = parse_qs(u.query)
             try:
                 if u.path in ("/", "/index.html"):
-                    self._index(p)
+                    self._list(p)
+                elif u.path == "/concept":
+                    self._concept(p)
                 elif u.path == "/blob":
                     self._blob(p)
+                elif u.path == "/page":
+                    self._page(p)
                 else:
                     self.send_error(404)
             except Exception as exc:  # noqa: BLE001
                 self.send_error(500, str(exc))
 
-        def _index(self, p):
-            where, params, limit = rows_where(p)
-            rows = q(f"""SELECT * FROM read_json_auto('{manifest}')
-                         WHERE {where} LIMIT {limit}""", params)
-            cols = [d[0] for d in q(
-                f"DESCRIBE SELECT * FROM read_json_auto('{manifest}')")]
-            total, uniq, insts = q(f"""
-                SELECT count(*), count(DISTINCT sha256),
-                       count(DISTINCT instances[1])
-                FROM read_json_auto('{manifest}') WHERE {where}""", params)[0]
-            recs = [dict(zip(cols, r)) for r in rows]
-            by_inst = {}
-            for r in recs:
-                for name in r.get("concepts") or [""]:
-                    by_inst.setdefault(name, []).append(r)
-            sections = "\n".join(
-                f'<h2>{esc(n)}<span>{len(rs)} 张</span></h2>'
-                + '<div class="grid">' + "\n".join(
-                    card(r, f"/blob?path={esc(r.get('path') or '')}&w=280")
-                    for r in rs)
-                + "</div>"
-                for n, rs in by_inst.items())
-            stats = (f"匹配 {total} 行 · {uniq} 唯一图 · {insts} 实例"
-                     f"（清单 {args.manifest}，实时）")
-            doc = PAGE.format(
-                instance=esc(p.get("instance", [""])[0]),
-                source=esc(p.get("source", [""])[0]),
-                min_q=esc(p.get("min_q", [""])[0]),
-                limit=esc(p.get("limit", [str(limit)])[0]),
-                stats=stats, sections=sections)
-            body = doc.encode()
+        def _send(self, body: bytes, ctype: str):
             self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
+        def _list(self, p):
+            kw = (p.get("q", [""])[0] or "").strip()
+            cond, params = "", ()
+            if kw:
+                cond, params = "WHERE list_contains(concepts, ?)", (kw,)
+            rows = q(f"""SELECT concepts[1] AS c, count(*) AS n,
+                        count(DISTINCT source) AS s,
+                        sum(CASE WHEN quality IS NOT NULL THEN 1 ELSE 0 END)
+                        FROM read_json_auto('{manifest_glob}') {cond}
+                        GROUP BY c ORDER BY n DESC, c""", params)
+            body = [('<form>概念 <input name="q" value="' + esc(kw)
+                     + '" size="12"><button>检索</button> <a href="/">全部</a>'
+                     '　<small>点击概念进入图墙</small></form>')]
+            total = sum(r[1] for r in rows)
+            met = sum(1 for r in rows if r[0] in quota and r[1] >= quota[r[0]])
+            body.append(f'<div id="stats">概念 {len(rows)} 个 · {total} 行'
+                        + (f' · 配额达标 {met}' if quota else "")
+                        + "（实时，清单 " + esc(args.manifest) + "）</div>")
+            trs = []
+            for c, n, srcs, ann in rows:
+                tgt = quota.get(c)
+                if tgt:
+                    pct = min(100, n * 100 // tgt)
+                    col = " ok" if pct >= 100 else ""
+                    shown = (f'<span class="bar{col}"><i style="width:{pct}%">'
+                             f"</i></span>{n}/{tgt}")
+                else:
+                    shown = str(n)
+                trs.append(f"<tr><td><a href='/concept?name={quote(c)}'>"
+                           f"{esc(c)}</a></td><td>{shown}</td>"
+                           f"<td>{srcs}</td><td>{ann or 0}</td></tr>")
+            body.append("<table><tr><th>概念</th><th>已采/目标</th>"
+                        "<th>来源数</th><th>已标注</th></tr>"
+                        + "".join(trs) + "</table>")
+            self._send(page_html("".join(body), "· 概念列表").encode(),
+                       "text/html; charset=utf-8")
+
+        def _concept(self, p):
+            name = p.get("name", [""])[0]
+            src_f = (p.get("source", [""])[0] or "").strip()
+            conds, params = ["list_contains(concepts, ?)"], [name]
+            if src_f:
+                conds.append("source = ?")
+                params.append(src_f)
+            where = " AND ".join(conds)
+            rows = q(f"""SELECT * FROM read_json_auto('{manifest_glob}')
+                         WHERE {where} ORDER BY quality DESC NULLS LAST""",
+                     tuple(params))
+            cols = [d[0] for d in q(
+                f"DESCRIBE SELECT * FROM read_json_auto('{manifest_glob}')")]
+            recs = [dict(zip(cols, r)) for r in rows]
+            src_stats = q(f"""SELECT source, count(*) FROM
+                         read_json_auto('{manifest_glob}') WHERE {where}
+                         GROUP BY source ORDER BY 2 DESC""", tuple(params))
+            tgt = quota.get(name)
+            docs = []
+            if os.path.exists(docs_glob):
+                docs = q(f"""SELECT url, path FROM
+                             read_json_auto('{docs_glob}')
+                             WHERE list_contains(concepts, ?)""", (name,))
+            cards = "\n".join(
+                card(r, f"/blob?path={esc(r.get('path') or '')}&w=280")
+                for r in recs)
+            src_links = " · ".join(
+                f"<a href='/concept?name={quote(name)}&source={esc(s)}'>"
+                f"{esc(s)}({n})</a>" for s, n in src_stats) or "—"
+            ann_n = sum(1 for r in recs if r.get("quality") is not None)
+            docs_html = ""
+            if docs:
+                items = "".join(
+                    f'<li>{esc(u or "curated")} <a href="/page?path='
+                    f'{esc(pp)}">正文</a></li>' for u, pp in docs)
+                docs_html = (f"<h2>知识文档<span>{len(docs)} 篇</span></h2>"
+                             f"<ul>{items}</ul>")
+            head = (f'<a href="/">← 概念列表</a><h2>{esc(name)}<span>'
+                    f'{len(recs)} 张' + (f" · 目标 {tgt}" if tgt else "")
+                    + f' · 已标注 {ann_n}</span></h2>'
+                    f'<p style="font-size:12px;color:#666">来源：{src_links}</p>')
+            self._send(page_html(head + docs_html
+                                 + f'<div class="grid">{cards}</div>',
+                                 f"· {name}").encode(),
+                       "text/html; charset=utf-8")
+
+        def _page(self, p):
+            rel = (p.get("path", [""])[0] or "").lstrip("/")
+            full = os.path.join(root, rel)
+            if (not rel.startswith("pages/") or ".." in rel
+                    or not os.path.exists(full)):
+                self.send_error(404)
+                return
+            text = open(full, encoding="utf-8", errors="replace").read()
+            self._send(page_html(
+                f'<pre class="doc">{esc(text)}</pre>', "· 文档正文").encode(),
+                "text/html; charset=utf-8")
+
         _MIME = {".png": "image/png", ".jpg": "image/jpeg",
                  ".jpeg": "image/jpeg", ".gif": "image/gif",
                  ".webp": "image/webp", ".bmp": "image/bmp"}
-        _thumb_sem = threading.Semaphore(4)   # 并发解码上限（防同时解大图）
+        _thumb_sem = threading.Semaphore(4)
 
         def _blob(self, p):
             rel = (p.get("path", [""])[0] or "").lstrip("/")
-            full = os.path.join(args.dataset, rel)
+            full = os.path.join(root, rel)
             if (not rel.startswith("blobs/") or ".." in rel
                     or not os.path.exists(full)):
                 self.send_error(404)
                 return
             w = p.get("w", [None])[0]
-            if w:      # 缩略图（网格快览）：PIL 现缩，限最大边与并发
+            if w:
                 with Handler._thumb_sem:
                     data = thumb_jpeg(full, min(int(w), 400))
-                self.send_response(200)
-                self.send_header("Content-Type", "image/jpeg")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control", "max-age=86400")
-                self.end_headers()
-                self.wfile.write(data)
+                self._send(data, "image/jpeg")
                 return
-            # 原图：分块流式（服务器内存 O(64KB)，解码在浏览器端）
             size = os.path.getsize(full)
             self.send_response(200)
             self.send_header("Content-Type", Handler._MIME.get(
@@ -220,81 +284,73 @@ def run_serve(args) -> None:
                             break
                         self.wfile.write(chunk)
             except (BrokenPipeError, ConnectionResetError):
-                pass    # 客户端提前断开（切页）是常态
+                pass
 
     srv = ThreadingHTTPServer((args.bind, args.port), Handler)
-    print(f"[preview] http://{args.bind}:{args.port} ← 清单 {manifest}（实时）"
-          f"\n[preview] 笔记本访问：ssh -N -L {args.port}:localhost:{args.port} "
-          f"ubuntu@<本机> 后开 http://localhost:{args.port}", flush=True)
+    print(f"[preview] http://{args.bind}:{args.port} ← {manifest_glob}"
+          f"（实时：概念列表→图墙→原图）\n[preview] 笔记本："
+          f"ssh -N -L {args.port}:localhost:{args.port} ubuntu@<本机>"
+          f" 后开 http://localhost:{args.port}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n[preview] 退出")
 
 
-# ---------------------------------------------------------------------------
-# export 模式：离线自包含单文件（旧形态，无网络场景备用）
-# ---------------------------------------------------------------------------
-
 def run_export(args) -> None:
     rows = []
-    with open(os.path.join(args.dataset, "meta", args.manifest),
-              encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+    import glob as _glob
+    for path in sorted(_glob.glob(os.path.join(
+            args.dataset, "meta", args.manifest))):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
     rows = rows[:args.limit]
-    by_inst: dict = {}
+    by_concept: dict = {}
     for r in rows:
-        for name in r.get("concepts") or [""]:
-            by_inst.setdefault(name, []).append(r)
-    annotated = sum(1 for r in rows if r.get("quality") is not None)
-
-    def b64_thumb(row):
-        try:
-            data = thumb_jpeg(os.path.join(args.dataset,
-                                           row.get("path") or ""), 240)
-            return "data:image/jpeg;base64," + base64.b64encode(data).decode()
-        except Exception:  # noqa: BLE001 - 坏图跳卡片图
-            return None
-
+        for name in r.get("concepts") or [r.get("name")]:
+            by_concept.setdefault(name, []).append(r)
     sections = []
-    for name, rs in by_inst.items():
+    for name, rs in by_concept.items():
         cards = []
         for r in rs:
-            src_uri = b64_thumb(r)
-            if not src_uri:
+            try:
+                data = thumb_jpeg(os.path.join(args.dataset,
+                                               r.get("path") or ""), 240)
+                uri = ("data:image/jpeg;base64,"
+                       + base64.b64encode(data).decode())
+                cards.append(card(r, uri))
+            except Exception:  # noqa: BLE001
                 continue
-            cards.append(card(r, src_uri))
         sections.append(f"<h2>{esc(name)}<span>{len(cards)} 张</span></h2>"
                         f'<div class="grid">{"".join(cards)}</div>')
-    stats = (f"{len(rows)} 行 · {len({r['sha256'] for r in rows})} 唯一图 · "
-             f"{len(by_inst)} 实例 · 已标注 {annotated}（离线快照）")
-    doc = PAGE.format(instance="", source="", min_q="", limit=args.limit,
-                      stats=stats, sections="\n".join(sections))
+    stats = f"{len(rows)} 行 · {len(by_concept)} 概念（离线快照）"
     with open(args.out, "w", encoding="utf-8") as f:
-        f.write(doc)
+        f.write(page_html("".join(sections), stats))
     print(f"[preview] {stats}\n[preview] 写出 {args.out}"
           f"（{os.path.getsize(args.out) // 1024} KB）")
 
 
-
 def main() -> None:
-    ap = argparse.ArgumentParser(description="采集结果预览（serve=活服务 / export=离线）")
+    ap = argparse.ArgumentParser(description="采集湖预览")
     sub = ap.add_subparsers(dest="mode")
     sp = sub.add_parser("serve")
     sp.add_argument("--dataset", default=DEFAULT_DATASET)
-    sp.add_argument("--manifest", default="image.jsonl")
+    sp.add_argument("--manifest", default="image*.jsonl",
+                    help="清单 glob（默认分片+合并件全量）")
+    sp.add_argument("--blob-root", default="",
+                    help="blob/页面根（共享存储；缺省=--dataset）")
     sp.add_argument("--port", type=int, default=8901)
-    sp.add_argument("--bind", default="127.0.0.1",
-                    help="默认仅本机（配 SSH 隧道）；公网直连需安全组放行")
+    sp.add_argument("--bind", default="127.0.0.1")
     ep = sub.add_parser("export")
     ep.add_argument("--dataset", default=DEFAULT_DATASET)
-    ep.add_argument("--manifest", default="image.jsonl")
+    ep.add_argument("--manifest", default="image*.jsonl")
+    ep.add_argument("--blob-root", default="")
     ep.add_argument("--limit", type=int, default=200)
     ep.add_argument("--out", default="preview.html")
     args = ap.parse_args()

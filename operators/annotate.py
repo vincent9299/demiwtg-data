@@ -302,7 +302,6 @@ class ManifestSink:
         self.dataset_dir = dataset_dir
         self.manifest = os.path.join(dataset_dir, "meta", manifest_name)
         os.makedirs(os.path.dirname(self.manifest), exist_ok=True)
-        os.makedirs(os.path.join(dataset_dir, "blobs"), exist_ok=True)
         self._store = AppendManifestStore(
             manifest=self.manifest,
             lock_path=os.path.join(os.path.dirname(self.manifest),
