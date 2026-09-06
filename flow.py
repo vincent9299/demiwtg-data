@@ -213,6 +213,16 @@ def main() -> None:
 
     def on_drain(engine_stats) -> None:
         cache.save()                   # 同步落盘最前（中断路径 await 可能截断）
+        # 引擎遥测落盘（反爬/性能分析数据源；ops_watch 采样收集）
+        try:
+            from demiflow.collect.search import dump_engine_telemetry
+            import json as _json
+            _path = os.path.join(args.dataset, "meta", "engine_telemetry.json")
+            _json.dump({"t": time.time(),
+                        "engines": dump_engine_telemetry()},
+                       open(_path, "w", encoding="utf-8"), ensure_ascii=False)
+        except Exception:  # noqa: BLE001 - 遥测失败不影响主链
+            pass
 
     def _run_once(rows):
         nonlocal stages
