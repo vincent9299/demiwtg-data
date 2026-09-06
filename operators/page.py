@@ -39,6 +39,7 @@ _SPLIT_RE = re.compile(r"\n\s*\n")
 _MIN_PASSAGE = 120          # 短于此并入下一段
 _MAX_PASSAGE = 900
 _INLINE_IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)[^)]*\)")
+_LINK_MD_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")   # [text](url) 链接语法
 _JUNK_RE = re.compile(
     r"\.(svg|ico)(\?|$)|/logo|/icon|/avatar|/spacer|/blank|badge|sprite",
     re.IGNORECASE)
@@ -79,9 +80,56 @@ def extract_passages(markdown: str) -> list:
                 images.append({"src": src, "alt": alt})
             return f"[图:{alt or '图'}]"
         text = _INLINE_IMG_RE.sub(_keep, p)
-        out.append({"id": f"p{i}", "text": text.strip(),
+        # 链密度过滤（2026-09-06：导航栏/菜单链列表治理）——剥掉链接语法
+        # 后的净文本占比 <35% 或链接数 >15 的块按导航垃圾丢弃
+        plain = _LINK_MD_RE.sub("", text)
+        plain = re.sub(r"\s+", "", plain)
+        total = len(re.sub(r"\s+", "", text))
+        n_links = len(_LINK_MD_RE.findall(text))
+        if total > 0 and (len(plain) / total < 0.35 or n_links > 15):
+            continue
+        out.append({"id": f"p{len(out)}", "text": text.strip(),
                     "images": images})
     return out
+
+
+_WIKI_URL_RE = re.compile(
+    r"https://([a-z\-]+)\.wikipedia\.org/wiki/([^?#]+)")
+
+
+async def _wiki_extract(url: str):
+    """wikipedia 页直取纯文本（REST extracts，redirects=1 自动跟随重定向）。
+
+    浏览器抓 wiki 页的两大痛点一并绕开：导航栏污染 markdown、重定向页
+    内容壳。失败返回 None 回退浏览器路径。"""
+    m = _WIKI_URL_RE.match(url)
+    if not m:
+        return None
+    lang, title = m.group(1), m.group(2)
+    from urllib.parse import unquote
+    title = unquote(title)
+    try:
+        from operators.search import API_UA
+        resp = await net.request(
+            "wiki_entity", "GET",
+            f"https://{lang}.wikipedia.org/w/api.php",
+            params={"action": "query", "prop": "extracts",
+                    "explaintext": "1", "redirects": "1", "format": "json",
+                    "titles": title},
+            headers={"User-Agent": API_UA})
+        pages = (resp.json().get("query") or {}).get("pages") or {}
+        for _, p in pages.items():
+            extract = p.get("extract")
+            if not extract or len(extract.strip()) <= 300:
+                continue
+            head = extract[:300]
+            if ("may also refer to" in head or "可以指" in head
+                    or "可以是指" in head):
+                continue               # 消歧义页：列表壳非知识，丢弃
+            return extract
+    except Exception:  # noqa: BLE001 - wiki 直取失败回退浏览器
+        pass
+    return None
 
 
 class PageFetchStage(StreamStage):
@@ -119,20 +167,26 @@ class PageFetchStage(StreamStage):
         if os.path.exists(md_path):
             markdown = open(md_path, encoding="utf-8", errors="replace").read()
         else:
-            if self._crawler is None:
-                self._crawler = PageCrawler(proxy=self._proxy,
-                                            page_timeout=self._timeout)
-                await self._crawler.__aenter__()
-            page = await self._crawler.fetch(url)
-            if page is None:
-                return None               # 抓取认缺
-            markdown = page["markdown"]
-            if page.get("title") and not row.get("title"):
-                row["title"] = page["title"]
+            wiki_md = await _wiki_extract(url)
+            if wiki_md is not None:
+                markdown = wiki_md        # wiki 直取纯文本（无导航栏）
+            else:
+                if self._crawler is None:
+                    self._crawler = PageCrawler(proxy=self._proxy,
+                                                page_timeout=self._timeout)
+                    await self._crawler.__aenter__()
+                page = await self._crawler.fetch(url)
+                if page is None:
+                    return None           # 抓取认缺
+                markdown = page["markdown"]
+                if page.get("title") and not row.get("title"):
+                    row["title"] = page["title"]
             await asyncio.to_thread(atomic_write_bytes, md_path,
                                     markdown.encode("utf-8"))
             self.pages += 1
         passages = extract_passages(markdown)
+        if len(passages) < 2:
+            return None               # 壳页质量门：导航/空壳/登录墙拒收
         self._fetched[concept] = self._fetched.get(concept, 0) + 1
         n_imgs = sum(len(p["images"]) for p in passages)
         return {**row, "page_sha": sha,
