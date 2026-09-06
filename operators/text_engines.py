@@ -159,7 +159,7 @@ def relevance_score(cand: dict, name: str, aliases: list) -> int:
     if any(d in cand.get("page_url", "") for d in _TRUSTED_URL):
         score += 8
     if any(d in cand.get("page_url", "") for d in _COMMERCE_URL):
-        score -= 25                  # 商业页强降权（<18 阈值自然出局）
+        score -= 40                  # 商业页强降权（实测 55 分别名命中也压出局）
     if any(m in (cand.get("snippet") or "") for m in _DISAMBIG_MARKS) \
             or "消歧义" in title:
         score -= 40
