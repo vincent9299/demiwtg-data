@@ -11,7 +11,8 @@ D2 分片形态（--shards N）：
   单写者清单（image-shard-i-of-N.jsonl）、各自分片词表与日志；
 - 限速预算由 flow 侧按分片数等分（scale_engine_limits），N 进程
   合计不超发；
-- 停摆判定按各分片自己的清单行数，独立重启互不影响；
+- 停摆判定按各分片自己的清单行数（图像+docs 双清单，任一增长即续期），
+  独立重启互不影响；
 - 跑完用 merge_shards.py 合并分片清单。
 
 职责边界：只做「看门狗」——拉起、盯清单行数、停摆则 kill+重拉；
@@ -99,13 +100,21 @@ def main() -> None:
         else:
             manifest = (DEFAULT_MANIFEST if n == 1 else os.path.join(
                 args.dataset, "meta", f"image-shard-{i}-of-{n}.jsonl"))
+        # 2026-09-06 巡检：docs 线运行期图像清单天然不增长，只盯图像清单
+        # 会把 >stall 分钟的 docs 线误杀（三机 docs 线 0 完成全因此）——
+        # 停摆判定改为盯图像+docs 双清单，任一增长即续期。
+        manifests = [manifest]
+        mb = os.path.basename(manifest)
+        if mb.startswith("image-shard-"):
+            manifests.append(os.path.join(
+                os.path.dirname(manifest), "docs-" + mb[len("image-"):]))
         log = args.flow_log or os.path.join(
             REPO_ROOT, "logs",
             "supervised_flow.log" if n == 1
             else f"supervised_flow_shard{i}.log")
-        children.append({"idx": i, "cmd": cmd, "manifest": manifest,
+        children.append({"idx": i, "cmd": cmd, "manifests": manifests,
                          "log": log, "proc": None, "logf": None,
-                         "last_lines": 0, "last_growth": time.time(),
+                         "last_lines": {}, "last_growth": time.time(),
                          "restarts": 0})
 
     shutting_down = False
@@ -120,16 +129,16 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _term)
     signal.signal(signal.SIGINT, _term)
-
     def _spawn(c: dict) -> None:
         c["logf"] = open(c["log"], "ab", buffering=0)
         c["proc"] = subprocess.Popen(c["cmd"], cwd=REPO_ROOT,
                                      stdout=c["logf"],
                                      stderr=subprocess.STDOUT)
-        c["last_lines"] = manifest_lines(c["manifest"])
+        c["last_lines"] = {m: manifest_lines(m) for m in c["manifests"]}
         c["last_growth"] = time.time()
         print(f"[supervise] 分片{c['idx']} 已拉起 pid={c['proc'].pid}"
-              f"（第 {c['restarts']} 次重启；清单 {c['manifest']}）", flush=True)
+              f"（第 {c['restarts']} 次重启；清单 {' + '.join(c['manifests'])}）",
+              flush=True)
 
     print(f"[supervise] 守护启动：{n} 分片，stall>{args.stall_minutes}min 重启；"
           f"参数 {flow_args}", flush=True)
@@ -150,13 +159,21 @@ def main() -> None:
                 c["restarts"] += 1
                 _spawn(c)
                 continue
-            lines = manifest_lines(c["manifest"])
-            if lines > c["last_lines"]:
-                c["last_lines"], c["last_growth"] = lines, time.time()
+            grew = False
+            for m in c["manifests"]:
+                lines = manifest_lines(m)
+                if lines > c["last_lines"].get(m, 0):
+                    c["last_lines"][m] = lines
+                    grew = True
+            if grew:
+                c["last_growth"] = time.time()
             elif time.time() - c["last_growth"] > args.stall_minutes * 60:
-                print(f"[supervise] 分片{c['idx']} 清单 "
+                frozen = ", ".join(
+                    f"{os.path.basename(m)}@{c['last_lines'].get(m, 0)}"
+                    for m in c["manifests"])
+                print(f"[supervise] 分片{c['idx']} 双清单 "
                       f"{args.stall_minutes} 分钟零增长"
-                      f"（停在 {c['last_lines']} 行），判定停摆，kill 重拉",
+                      f"（{frozen}），判定停摆，kill 重拉",
                       flush=True)
                 proc.kill()
                 proc.wait()
