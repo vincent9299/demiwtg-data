@@ -100,7 +100,7 @@ class PageFetchStage(StreamStage):
     catch = ()
 
     def __init__(self, store_root: str, *, proxy=None,
-                 max_pages_per_concept: int = 8, page_timeout: float = 40.0):
+                 max_pages_per_concept: int = 20, page_timeout: float = 40.0):
         self.root = store_root            # 共享存储数据集根（pages/ 落此）
         self._proxy = proxy
         self._max_pages = max_pages_per_concept

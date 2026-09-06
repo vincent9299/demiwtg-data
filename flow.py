@@ -86,6 +86,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--instances", default=DEFAULT_INSTANCES)
     p.add_argument("--concepts", default="",
                    help="概念批任务模式：concepts_batch json（优先于 --instances）")
+    p.add_argument("--docs-pages", type=int, default=20,
+                   help="docs 线每概念页面配额（默认 20）")
     p.add_argument("--quota-passes", type=int, default=2,
                    help="配额循环最大轮数（不足 min_images 的概念重跑；引擎结果"
                         "漂移有限，主要靠配额驱动的每行 top_n）")
@@ -265,8 +267,9 @@ def main() -> None:
 
             def _docs_run(rows, seed_stage=None):
                 st = [seed_stage or ConceptSeedStage(),
-                      TextSearchStage(per_query=2, aliases_by_name=aliases_map),
-                      PageFetchStage(share),
+                      TextSearchStage(per_query=3, aliases_by_name=aliases_map),
+                      PageFetchStage(share,
+                                max_pages_per_concept=args.docs_pages),
                       InlineImageStage(share),
                       DocsSinkStage(args.dataset, docs_name)]
                 stats = run_stages(local_data(), rows, st,
