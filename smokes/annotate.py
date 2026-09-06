@@ -94,7 +94,7 @@ async def main() -> None:
         assert await stage(other) is not None
         lines = [json.loads(l) for l in open(sink.manifest, encoding="utf-8")]
         assert len(lines) == 2
-        assert lines[0]["kb_match"] == 8 and lines[0]["instances"] == ["慕田峪长城"]
+        assert lines[0]["kb_match"] == 8 and lines[0]["concepts"] == ["慕田峪长城"]
         assert lines[0]["path"] == blob_rel               # 引用化路径
         blob = os.path.join(ds, lines[0]["path"])
         assert hashlib.sha256(open(blob, "rb").read()).hexdigest() == row["sha256"]

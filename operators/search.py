@@ -896,6 +896,9 @@ class SearchStage(StreamStage):
         sources = _sources_for(seed)
         if not sources:
             return None
+        # 每行切片数：行可带 top_n_hint 覆盖类默认（配额驱动切片用，
+        # 通用机制——不带提示的行走类声明值）
+        top_n = seed.get("top_n_hint") or self.top_n
         query = seed.get("query") or seed["name"]
         results = await asyncio.gather(*(
             engine_search(s, query, self.k, lang=seed.get("lang", "zh"))
@@ -906,7 +909,7 @@ class SearchStage(StreamStage):
                 if isinstance(rows, self.catch):
                     continue            # 单源认缺
                 raise rows              # 真异常（含网关 fail-fast）
-            for r in rows[:self.top_n]:  # 每源固定切片无补位
+            for r in rows[:top_n]:      # 每源固定切片无补位
                 out.append({**seed,
                             "source": source,
                             "tiers": r.get("tiers") or [],

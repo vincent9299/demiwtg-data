@@ -1,5 +1,5 @@
 """分片清单合并入口（编排侧维护工具，2026-09-04·D1）：
-meta/metadata-shard-*.jsonl → (sha256, instances) 去重合并为全量清单。
+meta/image-shard-*.jsonl → (sha256, instances) 去重合并为全量清单。
 
 用法：python3 merge_shards.py [--dataset DIR] [--pattern GLOB]
                               [--output NAME] [--dry-run]
@@ -19,8 +19,8 @@ DEFAULT_DATASET = os.path.join(REPO_ROOT, "datasets", "demiwtg")
 def main() -> None:
     p = argparse.ArgumentParser(description="分片清单合并（去重 + 原子写）")
     p.add_argument("--dataset", default=DEFAULT_DATASET)
-    p.add_argument("--pattern", default="metadata-shard-*.jsonl")
-    p.add_argument("--output", default="metadata.jsonl")
+    p.add_argument("--pattern", default="image-shard-*.jsonl")
+    p.add_argument("--output", default="image.jsonl")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
     r = merge_manifests(args.dataset, pattern=args.pattern,

@@ -113,8 +113,8 @@ def main() -> None:
         meta = os.path.join(dataset_dir, "meta")
         shards = sorted(f for f in os.listdir(meta)
                         if f.startswith("metadata-shard"))
-        assert shards == ["metadata-shard-0-of-2.jsonl",
-                          "metadata-shard-1-of-2.jsonl"]
+        assert shards == ["image-shard-0-of-2.jsonl",
+                          "image-shard-1-of-2.jsonl"]
         print("[PASS] 每分片单写者清单")
 
         # 2) 跨进程 blob 撞写：甲(分片0)与乙(分片1)同图集 → 同 blob 路径
@@ -123,8 +123,8 @@ def main() -> None:
         r = merge_manifests(dataset_dir)
         assert r["shards"] == 2 and r["dup_dropped"] == 0, r
         rows = [json.loads(l) for l in open(
-            os.path.join(meta, "metadata.jsonl"), encoding="utf-8")]
-        keys = {(x["sha256"], x["instances"][0]) for x in rows}
+            os.path.join(meta, "image.jsonl"), encoding="utf-8")]
+        keys = {(x["sha256"], x["concepts"][0]) for x in rows}
         shas = {x["sha256"] for x in rows}
         assert len(rows) == 6 and len(keys) == 6      # 3 实例 × top2
         assert len(shas) == 4                          # 甲乙同 2 图 + 丙 2 图

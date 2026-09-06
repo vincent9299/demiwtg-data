@@ -84,7 +84,7 @@ async def main() -> None:
         lines = read_manifest(sink)
         assert len(lines) == 1
         rec = lines[0]
-        assert rec["instances"] == ["慕田峪长城"]
+        assert rec["concepts"] == ["慕田峪长城"]
         assert rec["queries"] == {"慕田峪长城": "慕田峪长城"}
         assert rec["kb_match"] == 8 and rec["identity"] is True
         assert rec["width"] == 60 and rec["orig_width"] == 60
@@ -128,7 +128,7 @@ async def main() -> None:
         lines = read_manifest(sink)
         # 32 投入 - 1 次同实例撞车（共享图）；此前 22 行
         assert len(lines) == 22 + 31, len(lines)
-        pairs = {(r["sha256"], tuple(r["instances"])) for r in lines}
+        pairs = {(r["sha256"], tuple(r["concepts"])) for r in lines}
         assert len(pairs) == len(lines)
         assert sum(1 for r in lines
                    if r["sha256"] == hashlib.sha256(shared).hexdigest()) == 1

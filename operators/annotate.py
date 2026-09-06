@@ -11,7 +11,7 @@
   只打分不把关的口径不变：quality 供消费层排序/分层，链上不做阈值拒收；
 - VLM 失败（网络/解析重试耗尽）→ **无标注放行**（字段留 None），不弃图；
 - 只打分不把关：不做任何阈值拒收（kb_match 分段已定性不是归属验收闸门）；
-- 实例知识来自 datasets/demiwtg/meta/instances.json 只读查表（name→desc/aliases），
+- 实例知识查表（旧 instances.json 兼容读；概念模型下 KB 块来源将切 docs 层 wiki 摘要，P1），
   prompt 只给实体本身不给分类路径（旧约定）；
 - 预处理（缩最长边 + JPEG base64）只影响模型输入，不动行内 data 原始字节。
 """
@@ -243,11 +243,11 @@ async def annotate(row: dict, kb: dict, *, dataset_dir: str = "") -> dict:
 
 import time as _time
 
-# metadata.jsonl 字段集（最小兼容面，对齐读端口径；有新消费者再加）
+# image.jsonl 字段集（最小兼容面，对齐读端口径；有新消费者再加）
 RECORD_FIELDS = (
     "sha256", "ext", "source", "license", "author",
     "width", "height", "orig_width", "orig_height",
-    "size_bytes", "mime", "instances", "queries", "query_langs",
+    "size_bytes", "mime", "concepts", "queries", "query_langs",
     "content_url", "landing_url", "fetched_at", "path",
     "kb_match", "richness", "caption", "identity", "focus", "quality",
 )
@@ -255,7 +255,7 @@ RECORD_FIELDS = (
 
 def _row_keys(rec: dict) -> list:
     """清单行 → 去重键集（引擎 store 的 key_of 注入；存量兼容空实例名）。"""
-    return [(rec.get("sha256"), inst) for inst in rec.get("instances") or [""]]
+    return [(rec.get("sha256"), inst) for inst in rec.get("concepts") or [""]]
 
 
 def _record_for(row: dict) -> dict:
@@ -273,7 +273,7 @@ def _record_for(row: dict) -> dict:
         "orig_height": row.get("height"),
         "size_bytes": row.get("size_bytes"),
         "mime": row.get("mime"),
-        "instances": [row["name"]],
+        "concepts": [row["name"]],
         "queries": {row["name"]: row.get("query")},
         "query_langs": {row["name"]: row.get("lang")},
         "content_url": row.get("content_url"),
@@ -297,7 +297,7 @@ class ManifestSink:
     吸收式尾扫）；本类只持布局与字段契约。
     """
 
-    def __init__(self, dataset_dir: str, manifest_name: str = "metadata.jsonl"):
+    def __init__(self, dataset_dir: str, manifest_name: str = "image.jsonl"):
         import os
         self.dataset_dir = dataset_dir
         self.manifest = os.path.join(dataset_dir, "meta", manifest_name)
@@ -310,7 +310,7 @@ class ManifestSink:
         )
 
     def load_index(self) -> int:
-        """启动期全量扫清单建 (sha256, instance) 索引（续跑依据）。"""
+        """启动期全量扫清单建 (sha256, concept) 索引（续跑依据）。"""
         return self._store.load_index(_row_keys)
 
     def contains(self, row: dict) -> bool:
@@ -364,10 +364,10 @@ class AnnotateSinkStage(StreamStage):
 # 分片清单合并（2026-09-04·D1：分布式分片的离线汇合点）
 # ---------------------------------------------------------------------------
 
-def merge_manifests(dataset_dir: str, *, pattern: str = "metadata-shard-*.jsonl",
-                    output: str = "metadata.jsonl",
+def merge_manifests(dataset_dir: str, *, pattern: str = "image-shard-*.jsonl",
+                    output: str = "image.jsonl",
                     dry_run: bool = False) -> dict:
-    """合并分片清单：行级去重键 (sha256, instances 元组)，先到先得。
+    """合并分片清单：行级去重键 (sha256, concepts 元组)，先到先得。
 
     输入：meta/ 下匹配 pattern 的分片文件（每分片单写者，天然无冲突）；
     输出：meta/<output> 全量清单（pid 唯一临时文件 + os.replace 原子替换）。
@@ -392,7 +392,7 @@ def merge_manifests(dataset_dir: str, *, pattern: str = "metadata-shard-*.jsonl"
                     continue
                 total += 1
                 key = (rec.get("sha256"),
-                       tuple(rec.get("instances") or [""]))
+                       tuple(rec.get("concepts") or [""]))
                 if key in seen:
                     continue
                 seen.add(key)

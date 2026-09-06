@@ -109,12 +109,12 @@ def main() -> None:
 
         run_flow(tmp, dataset_dir, inst_path)
 
-        manifest = os.path.join(dataset_dir, "meta", "metadata.jsonl")
+        manifest = os.path.join(dataset_dir, "meta", "image.jsonl")
         rows = [json.loads(l) for l in open(manifest, encoding="utf-8")]
         assert len(rows) == 6, f"期望 6 行，实际 {len(rows)}"
         by_inst = {}
         for r in rows:
-            by_inst.setdefault(r["instances"][0], []).append(r)
+            by_inst.setdefault(r["concepts"][0], []).append(r)
         assert set(by_inst) == {n for n, _ in CASES}
         for name, rs in by_inst.items():
             assert len(rs) == 2
@@ -138,14 +138,14 @@ def main() -> None:
             run_flow(tmp, ds_shard, inst_path, shard=f"{idx}/2")
         shards = sorted(f for f in os.listdir(os.path.join(ds_shard, "meta"))
                         if not f.startswith("."))
-        assert shards == ["metadata-shard-0-of-2.jsonl",
-                          "metadata-shard-1-of-2.jsonl"], shards
+        assert shards == ["image-shard-0-of-2.jsonl",
+                          "image-shard-1-of-2.jsonl"], shards
         r = merge_manifests(ds_shard)
         assert r["output_rows"] == 6, r
         merged = [json.loads(l) for l in open(
-            os.path.join(ds_shard, "meta", "metadata.jsonl"), encoding="utf-8")]
-        base_keys = {(x["sha256"], x["instances"][0]) for x in rows2}
-        merged_keys = {(x["sha256"], x["instances"][0]) for x in merged}
+            os.path.join(ds_shard, "meta", "image.jsonl"), encoding="utf-8")]
+        base_keys = {(x["sha256"], x["concepts"][0]) for x in rows2}
+        merged_keys = {(x["sha256"], x["concepts"][0]) for x in merged}
         assert base_keys == merged_keys            # 分片并集 == 单进程全量
         print("[PASS] 分片运行 + merge 合并 = 全量（每分片单写者）")
         print("冒烟全部通过")

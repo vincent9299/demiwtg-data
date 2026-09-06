@@ -19,7 +19,7 @@ def _shard(meta: str, name: str, rows: list) -> None:
 
 
 def _row(sha: str, name: str, q: int = 8) -> dict:
-    return {"sha256": sha, "instances": [name], "quality": q, "path": f"blobs/x/{sha}.png"}
+    return {"sha256": sha, "concepts": [name], "quality": q, "path": f"blobs/x/{sha}.png"}
 
 
 def main() -> None:
@@ -27,13 +27,13 @@ def main() -> None:
     try:
         meta = os.path.join(tmp, "demiwtg", "meta")
         os.makedirs(meta)
-        _shard(meta, "metadata-shard-0-of-2.jsonl",
+        _shard(meta, "image-shard-0-of-2.jsonl",
                [_row("a", "甲"), _row("b", "乙")])
-        _shard(meta, "metadata-shard-1-of-2.jsonl",
+        _shard(meta, "image-shard-1-of-2.jsonl",
                [_row("b", "乙"),          # 完全重复（跨分片同键）
                 _row("b", "丙"),          # 同 sha 跨实例：合法保留
                 _row("c", "甲")])
-        with open(os.path.join(meta, "metadata-shard-1-of-2.jsonl"),
+        with open(os.path.join(meta, "image-shard-1-of-2.jsonl"),
                   "a", encoding="utf-8") as f:
             f.write('{"broken\n')          # 坏行容忍
 
@@ -41,15 +41,15 @@ def main() -> None:
         r = merge_manifests(os.path.join(tmp, "demiwtg"), dry_run=True)
         assert r == {"shards": 2, "input_rows": 5, "output_rows": 4,
                      "dup_dropped": 1}, r
-        assert not os.path.exists(os.path.join(meta, "metadata.jsonl"))
+        assert not os.path.exists(os.path.join(meta, "image.jsonl"))
         print(f"[PASS] dry-run 统计：{r}")
 
         # 正式合并：原子写、行数与键集合
         r = merge_manifests(os.path.join(tmp, "demiwtg"))
-        out = os.path.join(meta, "metadata.jsonl")
+        out = os.path.join(meta, "image.jsonl")
         lines = [json.loads(l) for l in open(out, encoding="utf-8")]
         assert len(lines) == 4
-        keys = {(x["sha256"], x["instances"][0]) for x in lines}
+        keys = {(x["sha256"], x["concepts"][0]) for x in lines}
         assert keys == {("a", "甲"), ("b", "乙"), ("b", "丙"), ("c", "甲")}
         assert r["output_rows"] == 4 and r["dup_dropped"] == 1
         print("[PASS] 合并落盘：先到先得去重、同 sha 跨实例保留、坏行容忍")

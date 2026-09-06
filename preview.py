@@ -157,7 +157,7 @@ def run_serve(args) -> None:
             recs = [dict(zip(cols, r)) for r in rows]
             by_inst = {}
             for r in recs:
-                for name in r.get("instances") or [""]:
+                for name in r.get("concepts") or [""]:
                     by_inst.setdefault(name, []).append(r)
             sections = "\n".join(
                 f'<h2>{esc(n)}<span>{len(rs)} 张</span></h2>'
@@ -250,7 +250,7 @@ def run_export(args) -> None:
     rows = rows[:args.limit]
     by_inst: dict = {}
     for r in rows:
-        for name in r.get("instances") or [""]:
+        for name in r.get("concepts") or [""]:
             by_inst.setdefault(name, []).append(r)
     annotated = sum(1 for r in rows if r.get("quality") is not None)
 
@@ -288,13 +288,13 @@ def main() -> None:
     sub = ap.add_subparsers(dest="mode")
     sp = sub.add_parser("serve")
     sp.add_argument("--dataset", default=DEFAULT_DATASET)
-    sp.add_argument("--manifest", default="metadata.jsonl")
+    sp.add_argument("--manifest", default="image.jsonl")
     sp.add_argument("--port", type=int, default=8901)
     sp.add_argument("--bind", default="127.0.0.1",
                     help="默认仅本机（配 SSH 隧道）；公网直连需安全组放行")
     ep = sub.add_parser("export")
     ep.add_argument("--dataset", default=DEFAULT_DATASET)
-    ep.add_argument("--manifest", default="metadata.jsonl")
+    ep.add_argument("--manifest", default="image.jsonl")
     ep.add_argument("--limit", type=int, default=200)
     ep.add_argument("--out", default="preview.html")
     args = ap.parse_args()

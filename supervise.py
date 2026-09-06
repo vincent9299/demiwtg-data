@@ -8,7 +8,7 @@ net.get_client 已禁 keep-alive 缓解，但不保证根绝）。停摆特征�
 
 D2 分片形态（--shards N）：
 - 每分片一个 flow 子进程（自动追加 --shard i/N）：输入切片、各自
-  单写者清单（metadata-shard-i-of-N.jsonl）、各自分片词表与日志；
+  单写者清单（image-shard-i-of-N.jsonl）、各自分片词表与日志；
 - 限速预算由 flow 侧按分片数等分（scale_engine_limits），N 进程
   合计不超发；
 - 停摆判定按各分片自己的清单行数，独立重启互不影响；
@@ -34,7 +34,7 @@ import time
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATASET = os.path.join(REPO_ROOT, "datasets", "demiwtg")
 DEFAULT_MANIFEST = os.path.join(
-    REPO_ROOT, "datasets", "demiwtg", "meta", "metadata.jsonl")
+    REPO_ROOT, "datasets", "demiwtg", "meta", "image.jsonl")
 
 
 def manifest_lines(path: str) -> int:
@@ -73,7 +73,7 @@ def main() -> None:
         if n > 1:
             cmd += ["--shard", f"{i}/{n}"]
         manifest = (DEFAULT_MANIFEST if n == 1 else os.path.join(
-            args.dataset, "meta", f"metadata-shard-{i}-of-{n}.jsonl"))
+            args.dataset, "meta", f"image-shard-{i}-of-{n}.jsonl"))
         log = args.flow_log or os.path.join(
             REPO_ROOT, "logs",
             "supervised_flow.log" if n == 1
