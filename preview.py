@@ -241,7 +241,8 @@ def run_serve(args) -> None:
                 docs = q(f"""SELECT url, path, authority, title, n_images
                              FROM read_json_auto('{docs_glob}')
                              WHERE list_contains(concepts, ?)
-                             ORDER BY (authority='wiki') DESC, url""",
+                             ORDER BY (authority='wiki') DESC NULLS LAST,
+                             url NULLS LAST""",
                          (name,))
             cards = "\n".join(
                 card(r, f"/blob?path={esc(r.get('path') or '')}&w=280")
