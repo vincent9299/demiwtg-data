@@ -99,7 +99,16 @@ cat /lhcos-data/demiwtg-data/datasets/demiwtg/pages/<aa>/<sha>.md | head -50
 3. push 后 **A/B 机 git pull**（supervise 崩溃自愈 5s 内吃到新代码；
    没崩的进程不会热更新——要立即生效就 `pkill -f 'venv/bin/python -m flow'`
    （**只杀 flow，别碰 supervise**——今天误杀两次）；
-4. A/B 代码 = `~/pipeline/{demiwtg-data,demiflow}` 双仓，都要 pull。
+4. A/B 代码 = `~/pipeline/{demiwtg-data,demiflow}` 双仓，都要 pull；
+5. **依赖同步**：改码若引入新包，三机都要装（对齐版本，如
+   `crawl4ai==0.9.3` + `playwright install chromium` + `sudo
+   playwright install-deps chromium`）——2026-09-06 A/B 漏装 crawl4ai
+   致 docs 线 rc=1 循环 52 次，仓内无 requirements 清单，全靠手工；
+6. **pkill 自杀坑**：ssh 远端命令行内含 `python -m flow` 字样时
+   `pkill -f "python -m flow"` 会杀掉 ssh 自己的 shell（静默无输出）——
+   必须用 `[p]ython` 括号技巧；
+7. **重启计数语义**：rc=0 批次跑完正常退出 → supervise 5s 重拉属设计
+   行为；计数增长≠故障，判读须看退出码与停摆消息。
 
 ## 四、关键路径速查
 
@@ -113,7 +122,7 @@ cat /lhcos-data/demiwtg-data/datasets/demiwtg/pages/<aa>/<sha>.md | head -50
 | `~/lake/meta/` | 本机分片清单（image-shard-2-of-3 / docs*.jsonl / engine_telemetry.json） |
 | `logs/supervised_flow.log`（仓内） | 本机 flow 子进程日志（崩溃栈在这） |
 | `~/pipeline/demiwtg-data/logs/supervised_flow.log`（远端） | A/B flow 日志 |
-| `~/lake_supervise.log` | supervise 自身日志（重启计数在这） |
+| `~/lake_supervise.log`（**仅 A/B**；本机 supervise 无独立日志，消息进 kilo 会话捕获，flow 日志即 `logs/supervised_flow.log`） | supervise 自身日志（重启计数/停摆判定在这） |
 
 SSH：`~/.ssh/config` 已配 `pipeline-a`(10.3.4.14) / `pipeline-b`(10.3.4.16)，
 密钥 `~/.ssh/lighthouse_key`。本机内网 10.3.0.14 / 公网 43.160.250.196。
