@@ -132,14 +132,21 @@ def relevance_score(cand: dict, name: str, aliases: list) -> int:
             if not a:
                 continue
             # 短西文别名（<5 字母）子串匹配太松（"Bolt"→"Ride with
-            # Bolt" 出租车页混入螺栓概念）——短词只认标题词级命中：
-            # 词边界整词出现才给分，且分值降到 40（长尾词面风险）
-            if re.fullmatch(r"[A-Za-z0-9 .\-]+", a) and len(a.replace(" ", "")) < 5:
-                if re.search(rf"\b{re.escape(a)}\b", title, re.IGNORECASE):
-                    score = max(score, 40)
+            # Bolt" 出租车页混入螺栓概念）。收紧：词边界命中且标题主部
+            # 词数 <=2 才给分（别名是标题主体）；埋在长标题里的词面
+            # 命中不给分。大小写不敏感。
+            tl = title.lower()
+            al = a.lower()
+            if (re.fullmatch(r"[A-Za-z0-9 .\-]+", a)
+                    and len(a.replace(" ", "")) < 5):
+                head = title.split("|")[0]
+                n_words = len(head.split())
+                if re.search(rf"\b{re.escape(a)}\b", title, re.IGNORECASE) \
+                        and n_words <= 2:
+                    score = max(score, 45)
                     break
                 continue
-            if a in title:
+            if al in tl:
                 score = max(score, 55)
                 break
     toks = set(re.findall(r"[a-z]{3,}", title.lower()))
