@@ -324,8 +324,8 @@ class ManifestSink:
         只负责清单幂等追加——单写者分片文件下连接 fcntl 都是冗余防线。
         """
         rel = row.get("blob_path")
-        if not rel or not row.get("sha256"):
-            return False
+        if not rel or not row.get("sha256") or not row.get("name"):
+            return False   # 无概念名的行拒绝落盘（防御：不让 null 进清单）
         return await self._store.write(
             data=b"",                       # blob 不重写（引用化）
             blob_path=os.path.join(self.dataset_dir, rel),

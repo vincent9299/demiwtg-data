@@ -186,6 +186,7 @@ def run_serve(args) -> None:
                 for c in list(docs_cnt):
                     if not any(r[0] == c for r in rows):
                         rows.append((c, 0, 0, 0))      # text-only 概念补位
+            rows = [r for r in rows if r[0]]   # null 概念行兜底（历史脏行）
             rows.sort(key=lambda r: (-docs_cnt.get(r[0], 0) - r[1], r[0]))
             body = [('<form>概念 <input name="q" value="' + esc(kw)
                      + '" size="12"><button>检索</button> <a href="/">全部</a>'
