@@ -80,7 +80,8 @@ class DownloadStage(StreamStage):
         self.dataset_dir = dataset_dir
 
     async def __call__(self, row: dict):
-        tiers = row.get("tiers") or []
+        tiers = [u for u in (row.get("tiers") or [])
+                 if str(u).startswith(("http://", "https://"))]
         if not tiers:
             return None
         got = await fetch_tiers(

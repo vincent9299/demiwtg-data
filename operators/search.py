@@ -808,8 +808,8 @@ class SearxngEngine:
         seen: set[str] = set()
         for res in resp.json().get("results", []):
             img = res.get("img_src")
-            if not img:
-                continue
+            if not img or not str(img).startswith(("http://", "https://")):
+                continue   # 相对/协议相对链（flickr 风等）无 host 不可下载
             key = str(img)
             if key in seen:
                 continue
