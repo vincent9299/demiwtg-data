@@ -716,7 +716,7 @@ class So360Engine:
 
     name = "so360"
     k_cap = K_SEMANTIC
-    limits = net.SourceLimits(rate=10.0, concurrency=16, proxy=False)
+    limits = net.SourceLimits(rate=2.0, concurrency=8)    # 2026-09-06 巡检降速：A机错误率52%持续两轮（反爬）
     dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=False)
     _API = "https://image.so.com/j"
 

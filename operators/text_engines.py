@@ -109,6 +109,9 @@ import re  # noqa: E402 （WikiEntityEngine 的 snippet 清洗用）
 _DISAMBIG_MARKS = ("可以指", "可以是指", "消歧义", "disambiguation")
 _TRUSTED_URL = ("wikipedia.org", "baike.baidu.com", "zhihu.com",
                 "britannica.com")
+# 电商/产品页（知识性低：商品列表/定价页混入 docs 的治理）
+_COMMERCE_URL = ("amazon.", "ebay.", "taobao.", "jd.com", "tmall.",
+                 "alibaba.", "walmart.", "aliexpress.", "bolt.eu")
 
 
 def relevance_score(cand: dict, name: str, aliases: list) -> int:
@@ -155,6 +158,8 @@ def relevance_score(cand: dict, name: str, aliases: list) -> int:
     score += 6 * len(toks & want)
     if any(d in cand.get("page_url", "") for d in _TRUSTED_URL):
         score += 8
+    if any(d in cand.get("page_url", "") for d in _COMMERCE_URL):
+        score -= 25                  # 商业页强降权（<18 阈值自然出局）
     if any(m in (cand.get("snippet") or "") for m in _DISAMBIG_MARKS) \
             or "消歧义" in title:
         score -= 40
