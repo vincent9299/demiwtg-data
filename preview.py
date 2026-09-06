@@ -160,7 +160,8 @@ def run_serve(args) -> None:
             sections = "\n".join(
                 f'<h2>{esc(n)}<span>{len(rs)} 张</span></h2>'
                 + '<div class="grid">' + "\n".join(
-                    card(r, f"/blob?path={esc(r.get('path') or '')}") for r in rs)
+                    card(r, f"/blob?path={esc(r.get('path') or '')}&w=280")
+                    for r in rs)
                 + "</div>"
                 for n, rs in by_inst.items())
             stats = (f"匹配 {total} 行 · {uniq} 唯一图 · {insts} 实例"
@@ -178,19 +179,46 @@ def run_serve(args) -> None:
             self.end_headers()
             self.wfile.write(body)
 
+        _MIME = {".png": "image/png", ".jpg": "image/jpeg",
+                 ".jpeg": "image/jpeg", ".gif": "image/gif",
+                 ".webp": "image/webp", ".bmp": "image/bmp"}
+        _thumb_sem = threading.Semaphore(4)   # 并发解码上限（防同时解大图）
+
         def _blob(self, p):
             rel = (p.get("path", [""])[0] or "").lstrip("/")
+            full = os.path.join(args.dataset, rel)
             if (not rel.startswith("blobs/") or ".." in rel
-                    or not os.path.exists(os.path.join(args.dataset, rel))):
+                    or not os.path.exists(full)):
                 self.send_error(404)
                 return
-            data = thumb_jpeg(os.path.join(args.dataset, rel))
+            w = p.get("w", [None])[0]
+            if w:      # 缩略图（网格快览）：PIL 现缩，限最大边与并发
+                with Handler._thumb_sem:
+                    data = thumb_jpeg(full, min(int(w), 400))
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "max-age=86400")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            # 原图：分块流式（服务器内存 O(64KB)，解码在浏览器端）
+            size = os.path.getsize(full)
             self.send_response(200)
-            self.send_header("Content-Type", "image/jpeg")
-            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Type", Handler._MIME.get(
+                os.path.splitext(rel)[1], "application/octet-stream"))
+            self.send_header("Content-Length", str(size))
             self.send_header("Cache-Control", "max-age=86400")
             self.end_headers()
-            self.wfile.write(data)
+            try:
+                with open(full, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass    # 客户端提前断开（切页）是常态
 
     srv = ThreadingHTTPServer((args.bind, args.port), Handler)
     print(f"[preview] http://{args.bind}:{args.port} ← 清单 {manifest}（实时）"
