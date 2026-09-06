@@ -66,14 +66,39 @@ def main() -> None:
         p.error("需要在 '--' 后给出 flow 的完整参数")
     n = max(1, args.shards)
 
+    # 透传参数里的 --dataset / --shard（单进程 supervise 挂分片时，
+    # 停摆监看应指向分片清单而非默认清单——2026-09-06 实跑踩坑）
+    def _passthrough(name, default=None):
+        try:
+            i = flow_args.index(name)
+            return flow_args[i + 1]
+        except (ValueError, IndexError):
+            return default
+    shard_arg = _passthrough("--shard", "")
+    if n == 1 and shard_arg:
+        try:
+            si, sn = (int(x) for x in shard_arg.split("/"))
+            assert 0 <= si < sn
+            n_s = sn          # 仅为推导清单名；子进程仍由 flow 自己切分片
+        except Exception:
+            si = 0
+        dataset = _passthrough("--dataset", args.dataset)
+        manifest = os.path.join(
+            dataset, "meta", f"image-shard-{si}-of-{shard_arg.split('/')[1]}.jsonl")
+    else:
+        manifest = None
+
     os.makedirs(os.path.join(REPO_ROOT, "logs"), exist_ok=True)
     children: list[dict] = []
     for i in range(n):
         cmd = [sys.executable, "-m", "flow", *flow_args]
         if n > 1:
             cmd += ["--shard", f"{i}/{n}"]
-        manifest = (DEFAULT_MANIFEST if n == 1 else os.path.join(
-            args.dataset, "meta", f"image-shard-{i}-of-{n}.jsonl"))
+        if manifest is not None and n == 1:
+            pass               # 单 supervise 挂分片：用透传推导的清单
+        else:
+            manifest = (DEFAULT_MANIFEST if n == 1 else os.path.join(
+                args.dataset, "meta", f"image-shard-{i}-of-{n}.jsonl"))
         log = args.flow_log or os.path.join(
             REPO_ROOT, "logs",
             "supervised_flow.log" if n == 1
