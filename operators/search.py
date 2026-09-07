@@ -876,7 +876,8 @@ for _e in _ENGINES:
     net.register_limits({_e.name: _e.limits, f"dl:{_e.name}": _e.dl_limits})
 
 # 折叠源下载闸续登记（检索已并入 searxng，下载按清单 source 查此表；
-# 未登记源走 net 默认无限制——这些源的 CDN 防盗链/速率历史经验保留）
+# net 严格登记制：未登记源 gate_for 直接抛错——聚合层启用的全部上游
+# 引擎都必须有 dl 键；agent 未来扩源时同步补此表）
 net.register_limits({
     f"dl:{n}": lim for n, lim in {
         "baidu": net.SourceLimits(rate=15.0, concurrency=32),
@@ -886,6 +887,19 @@ net.register_limits({
         "bing_images": net.SourceLimits(rate=15.0, concurrency=32),
         "yandex_images": net.SourceLimits(rate=15.0, concurrency=32),
         "wikimedia": net.SourceLimits(rate=6.0, concurrency=8),
+        # searxng 聚合的通用图库/西方引擎（通用档）
+        "artic": net.SourceLimits(rate=15.0, concurrency=32),
+        "brave_images": net.SourceLimits(rate=15.0, concurrency=32),
+        "devicons": net.SourceLimits(rate=15.0, concurrency=32),
+        "duckduckgo_images": net.SourceLimits(rate=15.0, concurrency=32),
+        "flickr": net.SourceLimits(rate=15.0, concurrency=32),
+        "google_cse_images": net.SourceLimits(rate=15.0, concurrency=32),
+        "lucide": net.SourceLimits(rate=15.0, concurrency=32),
+        "openverse": net.SourceLimits(rate=15.0, concurrency=32),
+        "pexels": net.SourceLimits(rate=15.0, concurrency=32),
+        "pinterest": net.SourceLimits(rate=15.0, concurrency=32),
+        "startpage_images": net.SourceLimits(rate=15.0, concurrency=32),
+        "unsplash": net.SourceLimits(rate=15.0, concurrency=32),
     }.items()
 })
 
