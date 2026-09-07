@@ -65,3 +65,8 @@ engines:
     shortcut: bk3
     categories: general
     disabled: false
+  - name: inaturalist
+    engine: demi_inaturalist
+    shortcut: inat
+    categories: images
+    disabled: false
