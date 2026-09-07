@@ -56,6 +56,21 @@ MAX_CANDIDATES = 8        # 单实例送判的西文候选上限（防超长别�
 _LATIN_RE = re.compile(r"[A-Za-z]")
 
 
+class RowSeedStage(StreamStage):
+    """行直通种子级：输入行即种子行（无投影/扩展）。
+
+    用于编排侧已构造好的种子行（概念模式首类、docs 二轮补检的扩展词
+    行等）——替代编排入口的内联匿名 Stage 类。
+    """
+
+    label = "seed"
+    concurrency = 8
+    queue_depth = 32
+
+    async def __call__(self, row):
+        return [row]
+
+
 class SeedCache:
     """判定结果词表：落盘 + 增量补判（用户拍板）。
 
