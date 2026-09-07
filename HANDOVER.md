@@ -23,7 +23,8 @@
 | supervise（分片 2/3） | 本机 persistent bgp `bgp_0770f36cc001YnomBo2I9xshMW` | 同上 | 挂了照下方命令重建 |
 | ops_watch.py（5min 采样） | 本机 persistent bgp `bgp_0766115c3001lN2cSz0Bfoy6Ta` | 采样+异常记档 | 同上 |
 | **patrol.py（45min 巡检）** | 本机 persistent bgp `bgp_0778803be001wa8QXQ53HXVFpS` | 健康+docs 抽样画像 | 同上 |
-| preview.py:8901 | 本机 persistent bgp `bgp_0771aef72001XFzh1XLMn05iJX` | 概念列表→图墙→docs 段落 | 同上 |
+| preview.py:8901 | 本机 persistent bgp `bgp_079afbbfd001qfkOqW7kFyZ8wS` | 概念列表→图墙→docs 段落。**2026-09-07 起指共享盘全分片视图**（`--dataset /lhcos-data/.../datasets/demiwtg --manifest 'image-shard-*.jsonl'`，读 a0/b1/c2 三镜像）；镜像靠巡检轮重刷：A/B scp + 本机 cp 到 `meta/{image,docs}-shard-{a0,b1,c2}-of-3.jsonl`。旧口径只挂本机 lake=只见 1/3 数据，勿回退 | 同上 |
+| jupyter:8890（质量 notebook） | 本机 persistent bgp `bgp_07984c641001VRONvzp2t8k2f3`，token `demi-quality-2026`，根目录 `/lhcos-data/demiwtg-data/analysis/`（quality.ipynb 首格自动 scp 拉三机最新清单） | 数据质量分析 | `ssh -N -L 8890:localhost:8890` |
 
 本机 supervise 重建命令（bgp 挂掉时）：
 
