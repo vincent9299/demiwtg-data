@@ -50,9 +50,10 @@
    （阈值不涨即可；E/F 路径在 ~/pipeline）
 2. **饥饿检测**：`python3 starvation_report.py`（七机清单×配额→
    饥饿概念+taxonomy 分支；>10% 饥饿 = 扩源信号→报告用户）
-3. **源健康**：`python3 source_health.py`（产量+启用集→死透候选+
-   复活排期；**general 引擎产量数据 09-07 17:12Z 起才积累**，杀源
-   名单要等 2-3 轮数据可信后再提议）
+3. **源健康**（一等指标）：`python3 source_health.py` v3——
+   **有效采集源数（24h/1h 窗口）**为战略指标（目标：业内最多，
+   searxng+自定义都要扩）；候选集限定路由可达类目（images+general，
+   videos/it 等不查询类目不算）；趋势留痕 telemetry/effective_sources.jsonl
 4. **agent 三动作**（人工门）：扩源（改 domain_sources.json 或写
    demi_* 引擎）/杀源（settings disabled+webgate 重启）/复活
    （单机金丝雀→观察→转正，lifecycle 状态机自动排期 72h）
@@ -95,6 +96,16 @@
 5. E 跨境 SSH 偶发 banner 超时（重试即通；supervise 自愈不影响采集）
 6. VLM 离线标注管线（采集吞吐优先暂缓；quality 字段全 None）
 7. CN 组是否加机：wave2 后看 E/F 认缺率拐点（>70% 且 SG 在产→+2 台）
+8. **扩源路线（有效源数 24h 基线 15/53，2026-09-07 v3 首跑）**：
+   路由喂活 artic/flickr/imgur/pixabay（探测有货、注册表没喂）→
+   修 pinterest/unsplash 解析（上游改版）→ fandom/safebooru 开发 →
+   T1 key 源注册（NASA/Europeana/TMDB/Rijksmuseum）→ CN 侧
+   tuchong/zcool 自定义源；**新源解锁前置步：bang 可达性实测**
+   （09-07 教训：+14 解锁源里 9 个上来就死 403，已杀）
+9. 09-07 17:5xZ 已杀 9 源（SG 五台 settings disabled+webgate 重启）：
+   adobe stock/cara/magnific/mojeek images/picjumbo/privacywall/
+   tusksearch/findfiles（403）+ openverse（上游默认启用显式覆盖）；
+   E/F 本就未启用；lifecycle 72h 金丝雀复活排期照常
 
 ## 七、历史坑索引（会话实证，勿再踩）
 
