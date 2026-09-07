@@ -18,6 +18,8 @@ import json
 import os
 import re
 import time
+import urllib.robotparser
+from urllib.parse import urlparse
 
 from demiflow.collect import net
 from demiflow.collect.crawl import PageCrawler
@@ -95,6 +97,46 @@ def extract_passages(markdown: str) -> list:
 
 _WIKI_URL_RE = re.compile(
     r"https://([a-z\-]+)\.wikipedia\.org/wiki/([^?#]+)")
+
+
+# robots.txt 门（2026-09-07 合规改造）：docs 线浏览器抓取前按 origin
+# 缓存解析 robots.txt，Disallow 即认缺。robots 拉取失败按允许处理
+# （fail-open：站点未部署 robots 不应阻断采集）；wiki REST 直取路径
+# 为官方 API（robots 明确允许 /w/api.php 与 /w/rest.php）不过此门。
+_ROBOTS_UA = "demiwtg-collector"
+_robots_cache: dict = {}
+
+
+def _robots_allows(url: str) -> bool:
+    try:
+        origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    except ValueError:
+        return True
+    rp = _robots_cache.get(origin)
+    if rp is None:
+        # 手动拉取喂 parser：robotparser.read() 的默认 Python-urllib UA
+        # 常被限流 403，而 403 语义 = 全禁（RFC 9309）——误杀面过大；
+        # 用项目 UA 拉，网络失败仍 fail-open
+        import urllib.request
+        rp = urllib.robotparser.RobotFileParser()
+        try:
+            req = urllib.request.Request(
+                origin + "/robots.txt",
+                headers={"User-Agent": "demiwtg-collector/0.1 "
+                         "(+https://github.com/vincent9299/demiwtg-data)"})
+            body = urllib.request.urlopen(req, timeout=8).read().decode(
+                "utf-8", "replace")
+            rp.parse(body.splitlines())
+        except Exception:               # noqa: BLE001 - 网络/解析失败 fail-open
+            _robots_cache[origin] = True
+            return True
+        _robots_cache[origin] = rp
+    if rp is True:
+        return True
+    try:
+        return rp.can_fetch(_ROBOTS_UA, url)
+    except Exception:                   # noqa: BLE001
+        return True
 
 
 async def _wiki_extract(url: str):
@@ -214,6 +256,8 @@ class PageFetchStage(StreamStage):
         if os.path.exists(md_path):
             markdown = open(md_path, encoding="utf-8", errors="replace").read()
         else:
+            if not _robots_allows(url):   # robots.txt 门（2026-09-07 合规）
+                return None               # 禁抓即认缺，不留缓存（下次重查）
             wiki_md = await _wiki_extract(url)
             if wiki_md is not None:
                 markdown = wiki_md        # wiki 直取纯文本（无导航栏）
