@@ -128,12 +128,14 @@ class ConceptSeedStage(StreamStage):
                    // (5 * _PAIRS_ASSUME))
         seeds = [{"name": concept["name"], "query": concept["name"],
                   "lang": "zh" if _CJK_RE.search(concept["name"]) else "latin",
-                  "top_n_hint": hint}]
+                  "top_n_hint": hint,
+                  "taxonomy": concept.get("taxonomy") or []}]
         for a in concept["aliases"]:
             a = str(a).strip()
             if not a or a == concept["name"]:
                 continue
             seeds.append({"name": concept["name"], "query": a,
                           "lang": "zh" if _CJK_RE.search(a) else "latin",
-                          "top_n_hint": hint})
+                          "top_n_hint": hint,
+                          "taxonomy": concept.get("taxonomy") or []})
         return seeds

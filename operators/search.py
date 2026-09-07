@@ -39,6 +39,7 @@ from __future__ import annotations
 import html as _html
 import json
 import re
+import os
 from typing import Optional
 
 import httpx
@@ -59,6 +60,101 @@ API_UA = ("collect-v2/0.1 (research image collection; "
 
 K_SEMANTIC = 5        # 语义检索源（wikimedia/搜索爬虫）K 封顶
 K_STRUCTURED = 15     # 结构化源（inaturalist 等）K 封顶，后续源启用时生效
+
+# ---------------------------------------------------------------------------
+# 领域→源路由（2026-09-07，taxonomy 驱动的双层引擎池）：
+# 注册表 = 原始项目交付 taxonomy_source_full_v3.1 转换（1333 节点带源，
+# 引擎名对齐 searxng 时代；宇宙概念前缀命中 ~74%，未命中走通用全池）。
+# 机制 = searxng 多 bang 并集前缀（engines 参数实测无效）；agent 饥饿
+# 循环扩源时只改 domain_sources.json 数据文件，路由逻辑零改动。
+# ---------------------------------------------------------------------------
+_ENGINE_BANGS = {          # 兜底捷径表（活配置拉取失败时用）
+    "baidu": "bdu", "toutiao": "tta", "huaban": "hbn", "pixiv": "pxv",
+    "inaturalist": "inat", "bing images": "bii", "yandex images": "ydi",
+    "wikicommons.images": "wcw", "bing": "bi", "360baike": "bk3",
+    "wikisearch": "wks", "quark images": "qki", "sogou images": "sgi",
+    "naver images": "nvi", "artstation": "arts", "500px": "5px",
+    "flickr": "flr", "unsplash": "usp", "pexels": "pxs",
+    "google images": "gi", "qwant images": "qwi",
+}
+
+_live_bangs_cache: Optional[dict] = None
+
+
+def _live_bangs() -> dict:
+    """本机 searxng 活配置的 {引擎名: shortcut}（仅启用引擎，惰性缓存）。
+
+    路由的启用感知：SG 池已禁 CN 源、CN 池已禁被墙源——注册表引擎集
+    与本机启用集取交集，避免 bang 打到已禁引擎静默空查。活配置不可达
+    时退兜底表（路由可能含未启用引擎，searxng 对未知 bang 忽略）。
+    """
+    global _live_bangs_cache
+    if _live_bangs_cache is not None:
+        return _live_bangs_cache
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:8080/config",
+            headers={"User-Agent": "demiwtg-collector/0.1"})
+        d = json.loads(urllib.request.urlopen(req, timeout=5).read())
+        cache = {e["name"]: e.get("shortcut")
+                 for e in d.get("engines", []) if e.get("enabled")}
+        _live_bangs_cache = {k: v for k, v in cache.items() if v}
+    except Exception:                     # noqa: BLE001 - 活配置失败退兜底
+        _live_bangs_cache = dict(_ENGINE_BANGS)
+    return _live_bangs_cache
+
+
+def _load_domain_registry():
+    """加载领域注册表 → 最长前缀匹配用的（节点路径, bang 集）列表。"""
+    import json as _json
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "domain_sources.json")
+    try:
+        raw = _json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError):
+        print(f"[search] 领域注册表缺失/损坏（{path}），路由退化为通用全池",
+              flush=True)
+        return []
+    nodes = []
+    unknown = set()
+    for node_path, engines in raw.items():
+        engs = []
+        for e in engines or []:
+            if e in _ENGINE_BANGS or e == "*":
+                engs.append(e)
+            else:
+                unknown.add(e)     # fandom/safebooru 等未开发引擎，静默跳过
+        if engs:
+            nodes.append((node_path, engs))
+    if unknown:
+        print(f"[search] 注册表含未开发引擎（跳过路由）: {sorted(unknown)}",
+              flush=True)
+    return sorted(nodes, key=lambda x: len(x[0]), reverse=True)
+
+
+_DOMAIN_NODES = _load_domain_registry()
+
+
+def _domain_bangs(taxonomy) -> list:
+    """概念 taxonomy → 本机可用的领域引擎 bang 集。
+
+    最长前缀匹配注册表（未命中=空=通用全池）；引擎集与本机活配置
+    启用集取交集（启用感知：SG/CN 池差异自动适配）。
+    """
+    if not taxonomy or not _DOMAIN_NODES:
+        return []
+    path = " / ".join(str(x).strip() for x in taxonomy)
+    engines = []
+    for node, engs in _DOMAIN_NODES:
+        if path.startswith(node) or node.startswith(path):
+            engines = engs
+            break
+    if not engines:
+        return []
+    live = _live_bangs()
+    bangs = [live[e] for e in engines if live.get(e)]
+    return sorted(set(bangs))
 
 
 def _int_or_none(v) -> Optional[int]:
@@ -968,8 +1064,13 @@ class SearchStage(StreamStage):
         # 通用机制——不带提示的行走类声明值）
         top_n = seed.get("top_n_hint") or self.top_n
         query = seed.get("query") or seed["name"]
+        # 领域路由（2026-09-07）：概念 taxonomy 命中注册表 → 查询串加
+        # bang 前缀限定引擎集（双层池：领域命中=领域池，未命中=通用全池）。
+        # 只改发给引擎的查询串，种子行/清单的 query 字段保持干净。
+        bangs = _domain_bangs(seed.get("taxonomy"))
+        routed = (" ".join(f"!{b}" for b in bangs) + " " + query) if bangs else query
         results = await asyncio.gather(*(
-            engine_search(s, query, self.k * getattr(get_engine(s), "fanout", 1),
+            engine_search(s, routed, self.k * getattr(get_engine(s), "fanout", 1),
                           lang=seed.get("lang", "zh"))
             for s in sources), return_exceptions=True)
         out: list[dict] = []

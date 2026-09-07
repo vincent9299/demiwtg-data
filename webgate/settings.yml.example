@@ -29,27 +29,27 @@ search:
 #     all://: http://192.168.10.109:10808
 
 # demiwtg 中文/专源引擎（2026-09-07 折源终态：demi_* 模块，代码在仓内维护）
+# ===== SG 组规范追加（2026-09-07 定版重建：国外全开，CN 源归 CN 组）=====
+
 engines:
-  - name: yandex images
-    disabled: false
   - name: baidu
     engine: demi_baidu
     shortcut: bdu
     categories: images
-    disabled: false
+    disabled: true
   - name: toutiao
     engine: demi_toutiao
     shortcut: tta
     categories: images
-    disabled: false
+    disabled: true
   - name: huaban
     engine: demi_huaban
     shortcut: hbn
     categories: images
-    disabled: false
+    disabled: true
   - name: pixiv
     engine: demi_pixiv
-    inactive: false   # 上游同名引擎 inactive:true，merge 会继承——必须显式覆盖
+    inactive: false
     shortcut: pxv
     categories: images
     disabled: false
@@ -57,8 +57,6 @@ engines:
     engine: demi_wikisearch
     shortcut: wks
     categories: general
-    disabled: false
-  - name: bing
     disabled: false
   - name: 360baike
     engine: demi_360baike
@@ -70,3 +68,77 @@ engines:
     shortcut: inat
     categories: images
     disabled: false
+  - name: google images
+    disabled: false
+  - name: qwant images
+    disabled: false
+  - name: naver images
+    disabled: false
+  - name: artstation
+    disabled: false
+  - name: 500px
+    disabled: false
+  - name: pixabay images
+    disabled: false
+  - name: stocksnap
+    disabled: false
+  - name: picjumbo
+    disabled: false
+  - name: library of congress
+    disabled: false
+  - name: giphy
+    disabled: false
+  - name: imgur
+    disabled: false
+  - name: adobe stock
+    disabled: false
+  - name: 1x
+    disabled: false
+  - name: cara
+    disabled: false
+  - name: findfiles images
+    disabled: false
+  - name: ipernity
+    disabled: false
+  - name: magnific
+    disabled: false
+  - name: mojeek images
+    disabled: false
+  - name: privacywall images
+    disabled: false
+  - name: public domain image archive
+    disabled: false
+  - name: shopify stock
+    disabled: false
+  - name: tusksearch images
+    disabled: false
+  - name: vuhuv images
+    disabled: false
+  - name: yacy images
+    disabled: false
+  - name: resulthunter images
+    disabled: false
+  - name: yandex images
+    disabled: false
+  - name: bing images
+    disabled: false
+  - name: google
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: mwmbl
+    disabled: false
+  - name: fireball
+    disabled: false
+  - name: yep
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: sogou images
+    disabled: true
+  - name: quark images
+    disabled: true
