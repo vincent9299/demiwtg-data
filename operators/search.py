@@ -106,7 +106,12 @@ def _live_bangs() -> dict:
 
 
 def _load_domain_registry():
-    """加载领域注册表 → 最长前缀匹配用的（节点路径, bang 集）列表。"""
+    """加载领域注册表 → 最长前缀匹配用的（节点路径, bang 集）列表。
+
+    过滤基准 = 本机活配置启用集（兜底表仅作 webgate 不可达时的降级），
+    避免"手写表漂移"冤杀活引擎（09-07 实证：pixabay/vuhuv/loc/artic
+    在表外被跳过）。查询时仍与 live 交集（启用感知不受影响）。
+    """
     import json as _json
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "domain_sources.json")
@@ -116,19 +121,22 @@ def _load_domain_registry():
         print(f"[search] 领域注册表缺失/损坏（{path}），路由退化为通用全池",
               flush=True)
         return []
+    live = _live_bangs()
+    degraded = set(live) == set(_ENGINE_BANGS)   # webgate 不可达→降级
+    avail = set(_ENGINE_BANGS) if degraded else set(live)
     nodes = []
     unknown = set()
     for node_path, engines in raw.items():
         engs = []
         for e in engines or []:
-            if e in _ENGINE_BANGS or e == "*":
+            if e == "*" or e in avail:
                 engs.append(e)
             else:
                 unknown.add(e)     # fandom/safebooru 等未开发引擎，静默跳过
         if engs:
             nodes.append((node_path, engs))
     if unknown:
-        print(f"[search] 注册表含未开发引擎（跳过路由）: {sorted(unknown)}",
+        print(f"[search] 注册表含本机未启用/未开发引擎（跳过路由）: {sorted(unknown)}",
               flush=True)
     return sorted(nodes, key=lambda x: len(x[0]), reverse=True)
 
