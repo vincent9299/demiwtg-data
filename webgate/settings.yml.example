@@ -53,3 +53,10 @@ engines:
     shortcut: pxv
     categories: images
     disabled: false
+  - name: wikisearch
+    engine: demi_wikisearch
+    shortcut: wks
+    categories: general
+    disabled: false
+  - name: bing
+    disabled: false

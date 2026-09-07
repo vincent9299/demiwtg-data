@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import asyncio
-import html as _html
 
 import httpx
 
@@ -21,48 +20,23 @@ from demiflow.data.plan import StreamStage
 # 文本引擎（SearchEngine 协议实现；与图像引擎同注册表不同路由表）
 # ---------------------------------------------------------------------------
 
+# docs 线终态（2026-09-07，与图像线同拍板）：关键词检索统一走 searxng
+# 聚合网关——WikiEntityEngine（wikipedia REST 直连）退役，wiki 召回改由
+# searxng general 池的 wikipedia/wikidata 引擎承接；SERP 引擎白名单
+# （原 engines="google, bing"）放开为不限制（按用户拍板，死源/噪声源
+# 由 relevance 门与后续 agent 化遥测剔除）。
+# wiki 抓取分叉不受影响：PageFetchStage 按 URL 模式走 _wiki_extract，
+# 与 authority 标签解耦（wikipedia.org 链接自动走 REST 直取路径）。
 
-class WikiEntityEngine:
-    """wikipedia 实体检索（REST v1，免爬免 key）：search/page 取候选页。
-
-    结构化、权威度高（合成材料 authority=wiki）；zh/en 按种子语言对位。
-    """
-
-    name = "wiki_entity"
-    k_cap = 4
-
-    limits = net.SourceLimits(rate=1.5, concurrency=2)
-    dl_limits = net.SourceLimits(rate=1.0, concurrency=2)   # 占位（文本引擎无下载闸）
-
-    _SEARCH = "/w/rest.php/v1/search/page"
-
-    async def search(self, query: str, k: int, *, lang: str = "en",
-                     client=None) -> list:
-        k = min(k, self.k_cap)
-        base = (f"https://zh.wikipedia.org" if lang == "zh"
-                else "https://en.wikipedia.org")
-        from operators.search import API_UA
-        resp = await net.request(
-            self.name, "GET", base + self._SEARCH, client=client,
-            params={"q": query, "limit": str(k)},
-            headers={"User-Agent": API_UA})
-        out = []
-        for p in (resp.json().get("pages") or [])[:k]:
-            key = p.get("key")
-            if not key:
-                continue
-            out.append({
-                "page_url": f"{base}/wiki/{key}",
-                "title": p.get("title"),
-                "snippet": _html.unescape(re.sub(
-                    r"<[^>]+>", "", p.get("excerpt") or ""))[:300],
-                "authority": "wiki",
-            })
-        return out
+_WIKI_UPSTREAM = ("wikipedia", "wikidata", "wikisearch")
 
 
 class SearxngGeneralEngine:
-    """SearXNG 通用 SERP（webgate categories=general）：广度补充。"""
+    """SearXNG 通用 SERP（webgate categories=general，引擎不设限）。
+
+    authority 溯源随结果走：上游 wikipedia/wikidata → wiki，其余 → serp
+    （合成材料权重与溯源口径与直连时代连续）。
+    """
 
     name = "searxng_general"
     k_cap = 6
@@ -79,27 +53,32 @@ class SearxngGeneralEngine:
             self.name, "GET", self._API, client=client,
             params={"q": query, "categories": "general", "format": "json",
                     "language": "zh-CN" if lang == "zh" else "en",
-                    "safesearch": 1, "engines": "google, bing"})
-        out = []
+                    "safesearch": 1})
+        out, seen = [], set()
         for r in (resp.json().get("results") or [])[:k]:
             url = r.get("url")
             if not url or not str(url).startswith(("http://", "https://")):
                 continue
+            if url in seen:
+                continue
+            seen.add(url)
+            upstream = str(r.get("engine") or "")
             out.append({"page_url": str(url), "title": r.get("title"),
                         "snippet": (r.get("content") or "")[:300],
-                        "authority": "serp"})
+                        "authority": "wiki"
+                        if any(w in upstream for w in _WIKI_UPSTREAM)
+                        else "serp"})
         return out
 
 
-register_engine(WikiEntityEngine())
 register_engine(SearxngGeneralEngine())
-net.register_limits({e.name: e.limits for e in
-                    (WikiEntityEngine(), SearxngGeneralEngine())})
+net.register_limits({"searxng_general": SearxngGeneralEngine.limits})
 
-# 文本路由：两语言都双引擎（wiki 权威打底，SERP 补广）
+# 文本路由：docs 线单引擎（searxng general 池内含 wikipedia/wikidata
+# 承接原 wiki_entity 的权威召回；语言参数对位 zh-CN/en 透传上游）
 TEXT_ROUTE_TABLE = {
-    "zh": ["wiki_entity", "searxng_general"],
-    "latin": ["wiki_entity", "searxng_general"],
+    "zh": ["searxng_general"],
+    "latin": ["searxng_general"],
 }
 
 
