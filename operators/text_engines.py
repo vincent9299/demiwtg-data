@@ -28,18 +28,18 @@ from demiflow.data.plan import StreamStage
 # wiki 抓取分叉不受影响：PageFetchStage 按 URL 模式走 _wiki_extract，
 # 与 authority 标签解耦（wikipedia.org 链接自动走 REST 直取路径）。
 
-_WIKI_UPSTREAM = ("wikipedia", "wikidata", "wikisearch")
 
 
 class SearxngGeneralEngine:
     """SearXNG 通用 SERP（webgate categories=general，引擎不设限）。
 
-    authority 溯源随结果走：上游 wikipedia/wikidata → wiki，其余 → serp
-    （合成材料权重与溯源口径与直连时代连续）。
+    自声明：wiki_upstream 元组（上游引擎名命中 → authority=wiki，与
+    直连时代 wiki_entity 的权威口径连续；其余 → serp）。
     """
 
     name = "searxng_general"
     k_cap = 6
+    wiki_upstream = ("wikipedia", "wikidata", "wikisearch")
 
     limits = net.SourceLimits(rate=6.0, concurrency=8)
     dl_limits = net.SourceLimits(rate=6.0, concurrency=8)
@@ -66,7 +66,7 @@ class SearxngGeneralEngine:
             out.append({"page_url": str(url), "title": r.get("title"),
                         "snippet": (r.get("content") or "")[:300],
                         "authority": "wiki"
-                        if any(w in upstream for w in _WIKI_UPSTREAM)
+                        if any(w in upstream for w in self.wiki_upstream)
                         else "serp"})
         return out
 

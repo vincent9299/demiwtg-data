@@ -47,7 +47,8 @@ from demiflow.collect import net
 import asyncio
 
 from demiflow.collect import net
-from demiflow.collect.search import (engine_search, is_connect_failure,
+from demiflow.collect.search import (engine_search, get_engine,
+                                     is_connect_failure,
                                      register_engine)
 from demiflow.data.plan import StreamStage
 
@@ -58,24 +59,6 @@ API_UA = ("collect-v2/0.1 (research image collection; "
 
 K_SEMANTIC = 5        # 语义检索源（wikimedia/搜索爬虫）K 封顶
 K_STRUCTURED = 15     # 结构化源（inaturalist 等）K 封顶，后续源启用时生效
-# 聚合源预算放大倍数：折源终态前 zh 路由 7 源，searxng 单源承接等量预算
-_AGGREGATE_MULT = 7
-
-
-# 折源终态：searxng 上游引擎名 → 清单 source 键（与旧直连适配命名对齐，
-# 分析/下载头/限速表零迁移成本；未知引擎走通用下划线归一）
-_UPSTREAM_MAP = {
-    "huaban": "huaban_api",
-    "wikicommons.images": "wikimedia",
-    "wikicommons": "wikimedia",
-}
-
-
-def _normalize_upstream(engine_name) -> Optional[str]:
-    if not engine_name or not str(engine_name).strip():
-        return None
-    key = str(engine_name).strip().lower().replace(" ", "_")
-    return _UPSTREAM_MAP.get(key, key)
 
 
 def _int_or_none(v) -> Optional[int]:
@@ -785,7 +768,12 @@ class So360Engine:
 
 
 class SearxngEngine:
-    """SearXNG 元搜索（2026-09-04 接入）：自托管本机实例聚合 google/bing/ddg 图片检索。
+    """SearXNG 元搜索（2026-09-04 接入；2026-09-07 折源终态后为唯一召回引擎）。
+
+    自声明（风格对齐：策略随引擎走，编排层零特判）：
+    - fanout：聚合预算放大倍数——单源承接原 7 直连源的候选/切片预算；
+    - upstream_dl_limits：上游引擎（清单 source 键）的下载闸，注册期展开；
+    - _UPSTREAM_MAP/_normalize_upstream：上游引擎名 → 清单 source 键归一。
 
     - 端点：data/webgate 模块的 /search?format=json（settings.yml 显式开 JSON，
       默认关闭；127.0.0.1:8080 仅本机监听）；
@@ -800,6 +788,36 @@ class SearxngEngine:
     # 聚合层 K：合并上游引擎的候选预算（折源终态前 zh 路由 7 源 × K_SEMANTIC=5
     # ≈ 35 候选/查询；searxng 单源承接需等量预算，否则单实例产量塌 7 倍）
     k_cap = 35
+    fanout = 7
+
+    # 上游引擎名 → 清单 source 键（与旧直连适配命名对齐保分析连续；
+    # 未知引擎走通用下划线归一）
+    _UPSTREAM_MAP = {
+        "huaban": "huaban_api",
+        "wikicommons.images": "wikimedia",
+        "wikicommons": "wikimedia",
+    }
+
+    # 上游引擎（清单 source 键）的下载闸：注册期展开为 dl:<upstream> 键。
+    # agent 扩源时在 searxng settings 启用新引擎 + 此表补一行即完成接线；
+    # 未登记的上游由平台默认兜底（net.DEFAULT_DL_LIMITS）
+    upstream_dl_limits = {
+        "baidu": net.SourceLimits(rate=15.0, concurrency=32),
+        "toutiao": net.SourceLimits(rate=15.0, concurrency=32),
+        "huaban_api": net.SourceLimits(rate=15.0, concurrency=32),
+        "pixiv": net.SourceLimits(rate=15.0, concurrency=32),
+        "bing_images": net.SourceLimits(rate=15.0, concurrency=32),
+        "yandex_images": net.SourceLimits(rate=15.0, concurrency=32),
+        "wikimedia": net.SourceLimits(rate=6.0, concurrency=8),
+    }
+
+    @classmethod
+    def _normalize_upstream(cls, engine_name) -> Optional[str]:
+        if not engine_name or not str(engine_name).strip():
+            return None
+        key = str(engine_name).strip().lower().replace(" ", "_")
+        return cls._UPSTREAM_MAP.get(key, key)
+
     limits = net.SourceLimits(rate=10.0, concurrency=16)
     dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=True)
     _API = "http://127.0.0.1:8080/search"
@@ -850,7 +868,7 @@ class SearxngEngine:
                         "title": res.get("title")},
                 # 折源终态：searxng 是传输层，溯源随结果走——上游引擎名
                 # 归一为清单 source 键（与旧直连适配命名对齐保分析连续）
-                "upstream": _normalize_upstream(res.get("engine")),
+                "upstream": self._normalize_upstream(res.get("engine")),
             })
             if len(out) >= k:
                 break
@@ -874,34 +892,11 @@ _ENGINES = (
 for _e in _ENGINES:
     register_engine(_e)
     net.register_limits({_e.name: _e.limits, f"dl:{_e.name}": _e.dl_limits})
-
-# 折叠源下载闸续登记（检索已并入 searxng，下载按清单 source 查此表；
-# net 严格登记制：未登记源 gate_for 直接抛错——聚合层启用的全部上游
-# 引擎都必须有 dl 键；agent 未来扩源时同步补此表）
-net.register_limits({
-    f"dl:{n}": lim for n, lim in {
-        "baidu": net.SourceLimits(rate=15.0, concurrency=32),
-        "toutiao": net.SourceLimits(rate=15.0, concurrency=32),
-        "huaban_api": net.SourceLimits(rate=15.0, concurrency=32),
-        "pixiv": net.SourceLimits(rate=15.0, concurrency=32),
-        "bing_images": net.SourceLimits(rate=15.0, concurrency=32),
-        "yandex_images": net.SourceLimits(rate=15.0, concurrency=32),
-        "wikimedia": net.SourceLimits(rate=6.0, concurrency=8),
-        # searxng 聚合的通用图库/西方引擎（通用档）
-        "artic": net.SourceLimits(rate=15.0, concurrency=32),
-        "brave_images": net.SourceLimits(rate=15.0, concurrency=32),
-        "devicons": net.SourceLimits(rate=15.0, concurrency=32),
-        "duckduckgo_images": net.SourceLimits(rate=15.0, concurrency=32),
-        "flickr": net.SourceLimits(rate=15.0, concurrency=32),
-        "google_cse_images": net.SourceLimits(rate=15.0, concurrency=32),
-        "lucide": net.SourceLimits(rate=15.0, concurrency=32),
-        "openverse": net.SourceLimits(rate=15.0, concurrency=32),
-        "pexels": net.SourceLimits(rate=15.0, concurrency=32),
-        "pinterest": net.SourceLimits(rate=15.0, concurrency=32),
-        "startpage_images": net.SourceLimits(rate=15.0, concurrency=32),
-        "unsplash": net.SourceLimits(rate=15.0, concurrency=32),
-    }.items()
-})
+    # 引擎自声明的上游下载闸（聚合引擎用：upstream_dl_limits 注册期展开
+    # 为 dl:<upstream> 键；非聚合引擎无此属性，零开销跳过）
+    _ups = getattr(_e, "upstream_dl_limits", None)
+    if _ups:
+        net.register_limits({f"dl:{n}": lim for n, lim in _ups.items()})
 
 
 # ---------------------------------------------------------------------------
@@ -959,7 +954,7 @@ class SearchStage(StreamStage):
         top_n = seed.get("top_n_hint") or self.top_n
         query = seed.get("query") or seed["name"]
         results = await asyncio.gather(*(
-            engine_search(s, query, self.k * (_AGGREGATE_MULT if s == "searxng" else 1),
+            engine_search(s, query, self.k * getattr(get_engine(s), "fanout", 1),
                           lang=seed.get("lang", "zh"))
             for s in sources), return_exceptions=True)
         out: list[dict] = []
@@ -968,8 +963,9 @@ class SearchStage(StreamStage):
                 if isinstance(rows, self.catch):
                     continue            # 单源认缺
                 raise rows              # 真异常（含网关 fail-fast）
-            # 聚合源切片放大：searxng 单源承接原 7 直连源的候选/切片预算
-            mult = _AGGREGATE_MULT if source == "searxng" else 1
+            # 聚合源切片放大：引擎声明的 fanout（聚合单源承接原多直连源
+            # 的候选/切片预算），非聚合引擎缺省 1
+            mult = getattr(get_engine(source), "fanout", 1)
             for r in rows[:top_n * mult]:   # 每源固定切片无补位
                 out.append({**seed,
                             "source": r.get("upstream") or source,
