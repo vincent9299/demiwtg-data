@@ -62,17 +62,22 @@ def local_enabled_engines():
         return set()
 
 
+def _norm(name: str) -> str:
+    """清单 source 键（下划线归一）↔ 引擎名（空格）对齐。"""
+    return name.strip().lower().replace(" ", "_")
+
+
 def main():
-    yield_map = fleet_manifest_sources()
+    yield_map = {_norm(k): v for k, v in fleet_manifest_sources().items()}
     enabled = local_enabled_engines()
     now = datetime.now(timezone.utc).isoformat()
     life = json.load(open(LIFE)) if os.path.exists(LIFE) else {}
 
-    zero_yield = sorted(e for e in enabled if yield_map.get(e, 0) == 0)
+    zero_yield = sorted(e for e in enabled if yield_map.get(_norm(e), 0) == 0)
     health = {}
     probation_due = []
     for e in sorted(enabled):
-        rows = yield_map.get(e, 0)
+        rows = yield_map.get(_norm(e), 0)
         state = "alive"
         st = life.get(e, {})
         if e in zero_yield:

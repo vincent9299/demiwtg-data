@@ -67,7 +67,11 @@ class SearxngGeneralEngine:
                         "snippet": (r.get("content") or "")[:300],
                         "authority": "wiki"
                         if any(w in upstream for w in self.wiki_upstream)
-                        else "serp"})
+                        else "serp",
+                        # 引擎溯源（源健康度口径）：general 池上游名归一
+                        # 落 source，与图像线同款——死透判定不再冤杀 docs 源
+                        "source": upstream.strip().lower().replace(" ", "_")
+                        or "searxng_general"})
         return out
 
 
