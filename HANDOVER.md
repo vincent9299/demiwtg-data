@@ -1,181 +1,132 @@
-# 交接文档：三机采集护航（2026-09-06 16:30 交接）
+# demiwtg 护航交接（2026-09-07 17:15Z 全量重写版）
 
-给接手护航的会话：本文档自包含，配合 `telemetry/JOURNAL.md`（事件史）
-与 `DEPLOY.md`（部署/运行手册）食用。
+> 新窗口开场白：**"读 HANDOVER.md 接手护航"** —— 然后按 §三 巡检。
+> 本版覆盖 09-06 16:39Z 至 09-07 17:15Z 的全部演化（旧版口径已失效）。
 
 ---
 
 ## 一、使命
 
-三机分片采集（283 概念批任务）持续运行中。护航职责：
+45 分钟~1 小时巡检七机 + docs 质量 + 记档（telemetry/JOURNAL.md）+ 持续优化。
+人工门原则：拓扑变更/切概念波/杀源等动作先报用户拍板。
 
-1. **每 45 分钟巡检一轮**：健康（反爬/停摆/崩溃）+ docs 抽样质量 review；
-2. 按发现**优化管线代码**（修完必须过冒烟再推，A/B 机 git pull 生效）；
-3. 一切发现/处置**记档** `telemetry/JOURNAL.md`（按轮次编号）；
-4. 目标：**高质量 docs**（壳页率 <20%、错页混入≈0、图文绑定保真）。
+## 二、当前运行态
 
-## 二、当前运行态（交接时刻）
+**七机舰队·二维正交架构**（组间按源分组 × 组内概念分片）：
 
-| 进程 | 位置 | 管理方式 | 停止/重启 |
-|---|---|---|---|
-| supervise（分片 0/3） | pipeline-a 远端 nohup | 自愈：flow 崩溃 5s 重拉 | `ssh pipeline-a 'pkill -f "python -m supervise"'`（**别用**，除非真要停） |
-| supervise（分片 1/3） | pipeline-b 远端 nohup | 同上 | 同上 |
-| supervise（分片 2/3） | 本机 persistent bgp `bgp_0770f36cc001YnomBo2I9xshMW` | 同上 | 挂了照下方命令重建 |
-| ops_watch.py（5min 采样） | 本机 persistent bgp `bgp_0766115c3001lN2cSz0Bfoy6Ta` | 采样+异常记档 | 同上 |
-| **patrol.py（45min 巡检）** | 本机 persistent bgp `bgp_0778803be001wa8QXQ53HXVFpS` | 健康+docs 抽样画像 | 同上 |
-| preview.py:8901 | 本机 persistent bgp `bgp_079afbbfd001qfkOqW7kFyZ8wS` | 概念列表→图墙→docs 段落。**2026-09-07 起指共享盘全分片视图**（`--dataset /lhcos-data/.../datasets/demiwtg --manifest 'image-shard-*.jsonl'`，读 a0/b1/c2 三镜像）；镜像靠巡检轮重刷：A/B scp + 本机 cp 到 `meta/{image,docs}-shard-{a0,b1,c2}-of-3.jsonl`。旧口径只挂本机 lake=只见 1/3 数据，勿回退 | 同上 |
-| jupyter:8890（质量 notebook） | 本机 persistent bgp `bgp_07984c641001VRONvzp2t8k2f3`，token `demi-quality-2026`，根目录 `/lhcos-data/demiwtg-data/analysis/`（quality.ipynb 首格自动 scp 拉三机最新清单） | 数据质量分析 | `ssh -N -L 8890:localhost:8890` |
+| 机 | 角色 | 分片 | 访问 | 备注 |
+|---|---|---|---|---|
+| 本机(43.160.250.196) | SG 组 | --shard 4/5 | 本地 | supervise 持久 bgp |
+| pipeline-a(10.3.4.14) | SG 组 | --shard 0/5 | ssh lighthouse_key | |
+| pipeline-b(10.3.8.9) | SG 组 | --shard 1/5 | ssh lighthouse_key | |
+| pipeline-c(10.3.0.17) | SG 组 | --shard 2/5 | ssh lighthouse_key | 09-07 新接 |
+| pipeline-d(10.3.8.9 同段) | SG 组 | --shard 3/5 | ssh lighthouse_key | 09-07 新接 |
+| pipeline-e(111.230.130.55) | CN 组 | --shard 0/2 | ssh cn_key 公网 | 广州；跨境 SSH 偶发 banner 超时 |
+| pipeline-f(159.75.21.11) | CN 组 | --shard 1/2 | ssh cn_key 公网 | 广州 |
 
-本机 supervise 重建命令（bgp 挂掉时）：
+- **SG 池**（西方引擎 ~44 个：google images/qwant/artstation/pixiv/
+  wikicommons/inaturalist/…）：五台 settings 已规范化（单 engines 键，
+  CN 五源 baidu/toutiao/huaban/sogou/quark 显式 disabled）
+- **CN 池**（baidu/toutiao/huaban/sogou/quark/bing/yandex + docs 检索
+  baidu/sogou/sogou wechat/360search/quark）：被墙源显式关闭
+- supervise 满参数：--search-concurrency 12 --download-concurrency 24
+  --instance-concurrency 8 --top-n 4 --vlm-concurrency 16
+  （VLM 探活跳过中——端点未部署，quality 全 None 属预期）
+- 重建命令在 git log 与本表；supervise 双清单停摆判定（image+docs 任一
+  增长即续期）
+- webgate（searxng 网关）：每机 127.0.0.1:8080，guard.py 看门狗常驻
+  （探活 30s 自动重拉）
+- **存储**：SG 桶 lhcos-368f6（ap-singapore）/ GZ 桶 lhcos-cee54
+  （ap-guangzhou，CN 组专用）——**用户拍板不同步**，分析时分别读；
+  清单在各机 ~/lake/meta（本地盘）。pan123 工具链已通
+  （~/demi/pan123，凭据在仓内 creds.json，交付包已取用）
 
-```
-cd /home/ubuntu/demi/demiwtg-data && /home/ubuntu/demi/.venv/bin/python -m supervise --stall-minutes 20 -- --concepts /lhcos-data/demiwtg-data/concepts_batch_200.json --dataset /home/ubuntu/lake --alias-cache /home/ubuntu/lake/alias.json --blob-root /lhcos-data/demiwtg-data/datasets/demiwtg --shard 2/3 --quota-passes 2 --docs-pages 20 --vlm-concurrency 4 --search-concurrency 6 --download-concurrency 8 --instance-concurrency 4 --log-every 20
-```
+## 三、巡检操作手册
 
-远端 A/B supervise 重建（如整进程死了）：
-
-```
-ssh pipeline-a 'cd ~/pipeline/demiwtg-data && nohup ../venv/bin/python -m supervise --stall-minutes 20 -- --concepts /lhcos-data/demiwtg-data/concepts_batch_200.json --dataset ~/lake --alias-cache ~/lake/alias.json --blob-root /lhcos-data/demiwtg-data/datasets/demiwtg --shard 0/3 --quota-passes 2 --docs-pages 20 --vlm-concurrency 4 --search-concurrency 6 --download-concurrency 8 --instance-concurrency 4 --log-every 20 > ~/lake_supervise.log 2>&1 < /dev/null & echo ok'
-```
-
-（B 机把 `--shard 0/3` 换 `1/3`）
-
-## 三、巡检操作手册（每 45 分钟）
-
-### 3.1 读最新轮
-
-```bash
-python3 -c "
-import json
-rows=[json.loads(l) for l in open('/lhcos-data/demiwtg-data/telemetry/patrol.jsonl')]
-r=rows[-1]
-print('轮次', r['round'], '| 告警:', r['health']['alerts'])
-print('docs 抽样:', r['docs']['shell_rate'], '壳页率 |', r['docs'].get('alert',''))
-for p in r['docs']['picks'][:8]:
-    print(f\"  {p['concept']} [{p['authority']}] {p['title'][:30]} {p['n_passages']}段/{p['n_images']}图\")"
-```
-
-### 3.2 判读与处置表
-
-| 信号 | 判定 | 处置 |
-|---|---|---|
-| `引擎错误率>30%` 告警 | 反爬嫌疑 | 连续 **2 轮** >50% 才动手：`operators/search.py` 该引擎 `limits` 降速（rate 减半），或摘出 `ROUTE_TABLE`；改完过 `smokes.search` 推送 |
-| `图像零增长` 告警 | 分片停滞 | `ssh <host> 'tail -3 ~/pipeline/demiwtg-data/logs/supervised_flow.log'` 看栈；supervise 20min 自愈兜底，先观察一轮 |
-| 重启计数 +N 频繁 | 崩溃循环 | 看日志栈定位；常见两类：rc=2=代码与参数不匹配（查 A/B 是否 git pull 到最新）；rc=1=代码 bug（读栈修） |
-| docs 壳页率 >40% | 质量门/抽取失效 | 抽 2-3 条 `picks` 的 url，`cat` 对应 pages/*.md 看原文；若原文是壳（登录墙/JS 渲染失败）→ 正常认缺；若原文有货但被滤 → 查 `extract_passages`（链密度阈值 0.35 / `_MIN_PASSAGE` 120） |
-| docs 混入错页 | 相关性过滤漏洞 | 用 `relevance_score`（`operators/text_engines.py`）复算该 title，调阈值/规则；**改完必须造反例验证**（看 JOURNAL Round 0 的 Bolt 案例） |
-| 图像质量异常（同图大量重复） | 引擎召回退化 | toutiao 已知嫌疑（9 行 2 唯一图）；持续则摘源 |
-
-### 3.3 人工 review docs（每轮 2-3 条深读）
-
-从 picks 挑可疑的，读原文与段落绑定：
-
-```bash
-# 概念详情页（preview 段落级渲染+绑定图）
-curl -s "http://127.0.0.1:8901/concept?name=<URL编码概念名>" | grep -A2 passage | head -40
-# 或直读页面正文
-cat /lhcos-data/demiwtg-data/datasets/demiwtg/pages/<aa>/<sha>.md | head -50
-```
-
-关注：段落是否真知识（非导航/菜单）、绑定图是否正文相关、wiki 直取页
-是否纯文本（应无 "Jump to content" 等导航字样——有则说明 wiki REST
-回退到了浏览器路径且 fit_markdown 失效）。
-
-### 3.4 记档
-
-每轮发现与处置追加 `telemetry/JOURNAL.md`：
-
-```
-### Round N（时间，简由）
-- 发现…（数据）
-- 处置…（commit hash）
-- 观察…（下轮跟进项）
-```
-
-### 3.5 代码变更纪律（血泪规约）
-
-1. **改前读文件**，改后 `python -m py_compile` + 对应 smoke 全绿；
-2. **commit 前必 `git show --stat` 核对文件清单**（今天有提交空壳事故：
-   命令超时被杀，提交名有实无——三机 rc=2 循环 2.5h 的根因）；
-3. push 后 **A/B 机 git pull**（supervise 崩溃自愈 5s 内吃到新代码；
-   没崩的进程不会热更新——要立即生效就 `pkill -f 'venv/bin/python -m flow'`
-   （**只杀 flow，别碰 supervise**——今天误杀两次）；
-4. A/B 代码 = `~/pipeline/{demiwtg-data,demiflow}` 双仓，都要 pull；
-5. **依赖同步**：改码若引入新包，三机都要装（对齐版本，如
-   `crawl4ai==0.9.3` + `playwright install chromium` + `sudo
-   playwright install-deps chromium`）——2026-09-06 A/B 漏装 crawl4ai
-   致 docs 线 rc=1 循环 52 次，仓内无 requirements 清单，全靠手工；
-6. **pkill 自杀坑**：ssh 远端命令行内含 `python -m flow` 字样时
-   `pkill -f "python -m flow"` 会杀掉 ssh 自己的 shell（静默无输出）——
-   必须用 `[p]ython` 括号技巧；
-7. **重启计数语义**：rc=0 批次跑完正常退出 → supervise 5s 重拉属设计
-   行为；计数增长≠故障，判读须看退出码与停摆消息。
+1. **七机健康**（每轮）：
+   `pgrep -f "[p]ython -m flow"` + `wc -l ~/lake/meta/image-shard-*.jsonl`
+   （注意本机是 4/5，E/F 是 i/2——glob 用 image-shard-*）+
+   `grep -c '^Traceback' ~/pipeline/demiwtg-data/logs/supervised_flow.log`
+   （阈值不涨即可；E/F 路径在 ~/pipeline）
+2. **饥饿检测**：`python3 starvation_report.py`（七机清单×配额→
+   饥饿概念+taxonomy 分支；>10% 饥饿 = 扩源信号→报告用户）
+3. **源健康**：`python3 source_health.py`（产量+启用集→死透候选+
+   复活排期；**general 引擎产量数据 09-07 17:12Z 起才积累**，杀源
+   名单要等 2-3 轮数据可信后再提议）
+4. **agent 三动作**（人工门）：扩源（改 domain_sources.json 或写
+   demi_* 引擎）/杀源（settings disabled+webgate 重启）/复活
+   （单机金丝雀→观察→转正，lifecycle 状态机自动排期 72h）
+5. **记档**：`cat >> /lhcos-data/demiwtg-data/telemetry/JOURNAL.md`
+   格式 `### Round N（时间，标题）+ 要点`，编号接续（当前 ~28）
 
 ## 四、关键路径速查
 
-| 路径 | 内容 |
-|---|---|
-| `/home/ubuntu/demi/demiwtg-data` | 主仓（本机源） |
-| `/home/ubuntu/demi/demiflow` | 引擎仓（本机源） |
-| `/home/ubuntu/demi/.venv` | 本机 Python 环境 |
-| `/lhcos-data/demiwtg-data/datasets/demiwtg/{meta,blobs,pages}` | 共享数据湖（COS 挂载） |
-| `/lhcos-data/demiwtg-data/telemetry/` | samples/incidents/patrol.jsonl + JOURNAL.md |
-| `~/lake/meta/` | 本机分片清单（image-shard-2-of-3 / docs*.jsonl / engine_telemetry.json） |
-| `logs/supervised_flow.log`（仓内） | 本机 flow 子进程日志（崩溃栈在这） |
-| `~/pipeline/demiwtg-data/logs/supervised_flow.log`（远端） | A/B flow 日志 |
-| `~/lake_supervise.log`（**仅 A/B**；本机 supervise 无独立日志，消息进 kilo 会话捕获，flow 日志即 `logs/supervised_flow.log`） | supervise 自身日志（重启计数/停摆判定在这） |
+- 仓库：本机 `/home/ubuntu/demi/demiwtg-data`（+`/home/ubuntu/demi/demiflow`
+  平台仓）；A/B git pull（github_key）；**C/D/E/F 无 github 通道——代码
+  变更用 rsync 按文件推送**（E/F 加 `-e "ssh -i ~/.ssh/cn_key"`）
+- 数据湖：`/lhcos-data/demiwtg-data/`（共享桶）；E/F 的 blob 落 GZ 桶
+  （同样路径，各自挂载）
+- 遥测：`telemetry/{JOURNAL.md,starvation_report.json,source_health.json,
+  samples.jsonl}`；engine_telemetry.json 在各机 ~/lake/meta（drain 落盘）
+- 领域注册表：`operators/domain_sources.json`（交付包
+  taxonomy_source_full_v3.1.csv 转换，1333 节点；改它=路由调整，零代码）
+- searxng 引擎模块：`webgate/searxng/searx/engines/demi_*.py`（随仓走）
+- preview:8901（全分片共享盘视图）/ jupyter:8890（token demi-quality-2026）
+  / pan123 下载工具 ~/demi/pan123/pan123.py
 
-SSH：`~/.ssh/config` 已配 `pipeline-a`(10.3.4.14) / `pipeline-b`(10.3.4.16)，
-密钥 `~/.ssh/lighthouse_key`。本机内网 10.3.0.14 / 公网 43.160.250.196。
+## 五、架构一句话
 
-Preview：`ssh -N -L 8901:localhost:8901 ubuntu@43.160.250.196` →
-`http://localhost:8901`（概念列表→图墙/docs→原图）。
+概念种子（taxonomy 透传）→ 领域路由（注册表最长前缀→searxng 多 bang
+并集，活配置启用感知）→ 唯一召回网关 searxng（44+引擎，上游引擎名
+归一落清单 source）→ 下载档位轮转（dl 限速表+平台默认兜底）→ 落盘
+（blob 内容寻址+清单幂等）。编排=链式 Dataset API
+（from_items→map_async×N→run_stream，fn|actor 二元注入）。
 
-## 五、架构一句话（详见各文件 docstring）
+## 六、在观察项（接手优先看）
 
-- **demiflow**（独立 GitHub 仓）：平台=引擎（streaming 流式/lazy 惰性）
-  +规范（StreamStage/SearchEngine）+资源（LLM 端点注册表/HTTP 双池限速）
-  +调度（run_stages）；`collect/`：net 限速分类重试、fetch_tiers 档位
-  轮转、crawl 页面抓取、store 内容寻址幂等清单、resume 断点现算、
-  search 引擎注册表+遥测（反爬数据源）、llm 端点。
-- **demiwtg-data**：`operators/`（seed/search/download/annotate/crawl/
-  concepts/text_engines/page）+ `flow.py` 编排（图像线+docs 线+配额循环）
-  + supervise 看门狗 + preview/import_base/merge_shards/ops_watch/patrol。
-- 概念模型：`{name, aliases[], carriers, taxonomy[]?}` 三字段+补充；
-  行键 `concepts`；清单 image*.jsonl（图）/docs*.jsonl（文），全部
-  (sha, concept) 幂等、分片单写者、内容寻址共享。
-- docs 线：TextSearch（wiki REST 直取+searxng general，相关性打分过滤）
-  → PageFetch（wiki extracts 直取绕浏览器/段落切分+内嵌图绑定/链密度
-  过滤/壳页质量门）→ InlineImage（绑定图落 blob）→ DocsSink。
-- 图像线：SearchStage（13 引擎扇出+配额驱动 top_n）→ DownloadStage
-  （blob 即时原子落盘+行引用化）→ AnnotateSink（VLM 缺席时无标注落盘）。
+1. **wave2 切换待拍板**：283 概念全队饥饿 0%（吃透），
+   `concepts_wave2_3000.json` 已备好——用户口令即切（全队 supervise
+   --concepts 换文件重拉；E/F 需 rsync 本地文件）
+2. general 引擎产量积累（docs source 溯源 09-07 17:12Z 上线）→
+   2-3 轮后出可信杀源名单
+3. fandom/safebooru 引擎待开发（注册表已留名：624/319 节点等着）
+4. 本机 webgate 的 baidu 引擎 crash（cookie 失效，已禁用无碍；
+   CN 机正常）
+5. E 跨境 SSH 偶发 banner 超时（重试即通；supervise 自愈不影响采集）
+6. VLM 离线标注管线（采集吞吐优先暂缓；quality 字段全 None）
+7. CN 组是否加机：wave2 后看 E/F 认缺率拐点（>70% 且 SG 在产→+2 台）
 
-## 六、在观察项（交接时刻未决）
+## 七、历史坑索引（会话实证，勿再踩）
 
-> **Round 1 增补（16:35）**：so360 已降速 10→2 rps（52% 错误率两轮）；
-> 商业域惩罚表上线（amazon/ebay/taobao 等 -40 分，玻璃刮→Amazon 实测
-> 出局）；三机 flow 已重启吃进新代码。**改完代码必须重启 flow 才生效**
-> （`pkill -f 'venv/bin/python -m flow'` 各机，supervise 5s 自动重拉）——
-> git pull 只更新磁盘代码，不热加载。
+1. `pkill -f "python -m flow"` 在 ssh 命令行内含同串会自杀→用 `[p]ython`
+2. settings.yml 重复 `engines:` 键：YAML 后键丢弃+searxng first-wins——
+   改引擎态必须单键显式重建（生成器模式）
+3. webgate venv 无 httpx（引擎模块用标准库）
+4. 上游同名引擎 inactive:true 会被 use_default_settings 继承→显式覆盖
+5. net 严格登记制：新上游源需 dl 键（或吃 DEFAULT_DL_LIMITS 兜底）
+6. 双仓升级顺序：先 demiflow 后 demiwtg，同窗完成（错配窗口
+   AttributeError 崩流，supervise 兜底但浪费）
+7. searxng `engines` URL 参数无效（用多 bang 并集）；bang 捷径以活配置
+   /config 为准（手写表会漂）
+8. ssh 内 heredoc 会丢（printf 追加）；ssh nohup 挂会话（setsid+重定向）
+9. robots 门：robotparser 默认 UA 被 403 限流→误判全禁（项目 UA 手动拉）
+10. 引擎遥测 drain 才落盘（运行中不可差分）；errors 字段是按异常类型的
+    dict
+11. GZ/SW 双桶：E/F 挂的是自家空桶起家→concepts 用本地文件
+    （~/concepts_batch_200.json）
+12. cosfs 公网直拉 SG 桶 = 外网流量费（¥120/天级）——跨境走 SG 机
+    区域内网读+rsync 推
+13. CN 机 playwright/pip 走清华镜像；github 不通（rsync 供码）
+14. 波次重分片会清空分片清单重采（blob 幂等，带宽成本可控）
 
-1. **so360 错误率 52%**（Round 0 遥测）——连续 2 轮 >50% 则降速/摘除；
-2. **toutiao 同图重复召回**（9 行 2 唯一）——质量嫌疑，攒数据再判；
-3. **A/B docs 线未开始**（图像配额段未完）——正常排队，非故障；若图像
-   配额完成后 docs 仍 0 行，查 A/B 的 demiflow 是否 pull 到遥测版本；
-4. 繁简标题不匹配（金鷹獎 vs 金鹰奖）——候选改进，不急；
-5. VLM 端点缺席：全部图像无标注（gate 验收后置）——等用户提供端点后
-   backfill 补标。
+## 八、近期主线 commit（倒序）
 
-## 七、历史坑索引（JOURNAL 有全量）
-
-cosfs rename 失败→直写回退；cosfs 最终一致性（大文件跨机校验）；
-supervise 分片监看路径；asyncio.Lock 跨 loop（每轮重建 stages）；
-run_stages 收尾清注入 mock（net/llm 注入层独立）；wiki UA 403（API_UA）；
-searxng 引擎死名单（general 锁 google,bing）；flickr 相对图链（绝对 URL
-守卫）；fit_markdown 失效回退 raw（链密度过滤）；消歧义页（REST 识别
-丢弃）；短别名词面混入（词边界+标题主部词数）；NULL concepts 脏行
-（sink 拒绝+preview 兜底）。
-
----
-
-交接完毕。接手会话从「3.1 读最新轮」开始即可。
+- 90e8b4e docs source 引擎溯源 + 健康归一化
+- 37b1109 source_health v2 + starvation_report（agent 三动作）
+- 4b677f5 领域→源路由 + settings 规范化 + 交付包转换
+- 59570e8 demi_inaturalist（官方 API·license 透传）
+- a06e31e 合规兜底链（snippet/Wayback/demi_360baike）
+- 06f5828 翻页×3 + VLM 探活跳过（吞吐 ×17.5 的主力）
+- 6f98567/fdad1a3/510d680/e2012ee 链式 API 回归系列（run_stages/
+  map_stage 移除）
+- c39ca5e so360 退役；9781dd5 折源终态（searxng 唯一网关）
