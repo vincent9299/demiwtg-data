@@ -787,7 +787,7 @@ class SearxngEngine:
     name = "searxng"
     # 聚合层 K：合并上游引擎的候选预算（折源终态前 zh 路由 7 源 × K_SEMANTIC=5
     # ≈ 35 候选/查询；searxng 单源承接需等量预算，否则单实例产量塌 7 倍）
-    k_cap = 35
+    k_cap = 100
     fanout = 7
 
     # 上游引擎名 → 清单 source 键（与旧直连适配命名对齐保分析连续；
@@ -822,18 +822,28 @@ class SearxngEngine:
     dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=True)
     _API = "http://127.0.0.1:8080/search"
 
+    # 翻页轮询深度（2026-09-07 扩容拍板）：单查询 searxng 聚合 ~30 条/
+    # 页，3 页 ×19 引擎合并去重后每概念候选 ×3-5，k_cap 相应放大
+    PAGES = 3
+
     async def search(self, query, k, *, lang="zh", client=None):
         k = min(k, self.k_cap)
-        params = {
-            "q": query,
-            "categories": "images",
-            "format": "json",
-            "language": "zh-CN" if lang == "zh" else "en",
-            "safesearch": 1,
-        }
-        try:
-            resp = await net.request(self.name, "GET", self._API,
+
+        async def _page(pageno: int):
+            params = {
+                "q": query,
+                "categories": "images",
+                "format": "json",
+                "language": "zh-CN" if lang == "zh" else "en",
+                "safesearch": 1,
+                "pageno": pageno,
+            }
+            return await net.request(self.name, "GET", self._API,
                                      params=params, client=client)
+
+        try:
+            pages = await asyncio.gather(*(_page(p) for p in range(1, self.PAGES + 1)),
+                                         return_exceptions=True)
         except (net.DeterministicError, net.TransientExhaustedError) as exc:
             # 网关没起是配置错误不是源故障：fail-fast 终止并给出口，
             # 不进认缺（否则全部 searxng 召回无声消失）
@@ -844,7 +854,12 @@ class SearxngEngine:
             raise
         out: list[dict] = []
         seen: set[str] = set()
-        for res in resp.json().get("results", []):
+        results: list[dict] = []
+        for pg in pages:
+            if isinstance(pg, BaseException):
+                continue                  # 单页失败不拖整查询（其余页供给）
+            results.extend(pg.json().get("results", []))
+        for res in results:
             img = res.get("img_src")
             if not img or not str(img).startswith(("http://", "https://")):
                 continue   # 相对/协议相对链（flickr 风等）无 host 不可下载

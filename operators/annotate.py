@@ -210,15 +210,45 @@ def _read_blob(dataset_dir: str, rel: str):
         return None
 
 
+_vlm_alive: Optional[bool] = None
+
+
+def _probe_vlm() -> bool:
+    """端点一次探活（进程级缓存）：不可达则本 run 全跳过标注。
+
+    2026-09-07 拍板：采集期不内联 VLM（离线标注管线另行补字段）——
+    端点未部署时每行白付 3 次重试×1s 睡眠 + PIL 编码开销，探活失败
+    即短路，标注字段留 None 放行。端点部署后自动恢复内联口径。"""
+    global _vlm_alive
+    if _vlm_alive is None:
+        import socket
+        from urllib.parse import urlparse
+        from demiflow.collect.llm import _ENDPOINT_CFG
+        url = _ENDPOINT_CFG["demiwtg_vlm"]["base_url"]
+        u = urlparse(url)
+        try:
+            with socket.create_connection(
+                    (u.hostname or "localhost", u.port or 80), timeout=1.0):
+                _vlm_alive = True
+        except OSError:
+            _vlm_alive = False
+            print("[annotate] VLM 端点不可达，本 run 无标注放行"
+                  "（采集吞吐优先；离线标注管线另行补字段）", flush=True)
+    return _vlm_alive
+
+
 async def annotate(row: dict, kb: dict, *, dataset_dir: str = "") -> dict:
     """对单条已下载图像行打标，就地追加标注键并返回。
 
     字节按行内 blob_path 引用从数据集读取（D1 引用化：行不携 data）；
     未下载（无 blob_path）/读失败/编码失败的行原样流转（缺列=未打标）；
     打标失败重试耗尽也原样流转（null=打过失败，两者由读端区分）。
+    端点探活失败：跳过编码与调用，整 run 无标注（见 _probe_vlm）。
     """
     rel = row.get("blob_path")
     if not rel:
+        return row
+    if not _probe_vlm():
         return row
     data = await asyncio.to_thread(_read_blob, dataset_dir, rel)
     if data is None:
