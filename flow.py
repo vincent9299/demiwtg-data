@@ -227,8 +227,8 @@ def image_line(args, ctx: dict) -> object:
                   args.vlm_concurrency, None),   # 深度=并发（字节上界）
         )
         stats = (local_data().from_items(rows)
-                 .map_stage(line[0]).map_stage(line[1])
-                 .map_stage(line[2]).map_stage(line[3])
+                 .map_async(line[0]).map_async(line[1])
+                 .map_async(line[2]).map_async(line[3])
                  .run_stream(on_progress=on_progress, on_drain=on_drain,
                              log_every=args.log_every))
         return line, stats
@@ -287,9 +287,9 @@ def docs_line(args, ctx: dict) -> tuple:
             _tune(DocsSinkStage(args.dataset, docs_name), 4, None),
         )
         stats = (local_data().from_items(rows)
-                 .map_stage(stages_list[0]).map_stage(stages_list[1])
-                 .map_stage(stages_list[2]).map_stage(stages_list[3])
-                 .map_stage(stages_list[4])
+                 .map_async(stages_list[0]).map_async(stages_list[1])
+                 .map_async(stages_list[2]).map_async(stages_list[3])
+                 .map_async(stages_list[4])
                  .run_stream(log_every=args.log_every))
         return list(stages_list), stats
 

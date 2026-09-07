@@ -67,7 +67,7 @@ def main() -> None:
               _tune(DocsSinkStage(args.dataset, args.manifest), 4, None)]
     t0 = time.time()
     stats = (local_data().from_items(rows)
-             .map_stage(stages[0]).map_stage(stages[1])
+             .map_async(stages[0]).map_async(stages[1])
              .run_stream(log_every=5000))
     print(f"[import] 完成，耗时 {(time.time()-t0)/60:.1f} 分钟："
           f"落 docs {stages[1].sunk} 行；{stats.summary()}")
