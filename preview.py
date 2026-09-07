@@ -37,6 +37,7 @@ button{padding:4px 12px;cursor:pointer}
 #stats{color:#666;margin:4px 0 12px;font-size:12px}
 table{border-collapse:collapse;background:#fff}
 td,th{border:1px solid #eee;padding:5px 10px;text-align:left;font-size:12px}
+.tax{color:#888;font-size:11px;white-space:nowrap}
 .bar{background:#eee;border-radius:4px;width:120px;height:10px;overflow:hidden;
 display:inline-block;vertical-align:middle;margin-right:6px}
 .bar i{display:block;height:100%;background:#5b8def}
@@ -119,6 +120,21 @@ def load_quota() -> dict:
     return out
 
 
+def load_taxonomy() -> dict:
+    """批任务在场则取 {概念: 分类路径}（末 2 级短口径 + 全路径）。"""
+    try:
+        doc = json.load(open(BATCH_PATH, encoding="utf-8"))
+    except OSError:
+        return {}
+    out = {}
+    for c in doc.get("concepts") or []:
+        segs = [s.strip() for s in " ".join(
+            c.get("taxonomy") or []).split("/") if s.strip()]
+        if segs:
+            out[c["name"]] = (" / ".join(segs[-2:]), " / ".join(segs))
+    return out
+
+
 def run_serve(args) -> None:
     import glob as _glob
     import duckdb
@@ -130,6 +146,7 @@ def run_serve(args) -> None:
     docs_glob = os.path.join(meta_dir, args.docs_manifest)
     has_docs = bool(_glob.glob(docs_glob))
     quota = load_quota()
+    tax = load_taxonomy()
     root = args.blob_root or args.dataset   # blob/pages 解析根（共享存储）
 
     lock = threading.Lock()
@@ -206,11 +223,15 @@ def run_serve(args) -> None:
                              f"</i></span>{n}/{tgt}")
                 else:
                     shown = str(n)
+                tshort = tax.get(c, ("", ""))[0]
                 trs.append(f"<tr><td><a href='/concept?name={quote(c)}'>"
-                           f"{esc(c)}</a></td><td>{shown}</td>"
+                           f"{esc(c)}</a></td>"
+                           f"<td class='tax'>{esc(tshort)}</td>"
+                           f"<td>{shown}</td>"
                            f"<td>{docs_cnt.get(c, 0)}</td>"
                            f"<td>{srcs}</td><td>{ann or 0}</td></tr>")
-            body.append("<table><tr><th>概念</th><th>图 已采/目标</th>"
+            body.append("<table><tr><th>概念</th><th>分类</th>"
+                        "<th>图 已采/目标</th>"
                         "<th>docs</th><th>图源数</th><th>已标注</th></tr>"
                         + "".join(trs) + "</table>")
             self._send(page_html("".join(body), "· 概念列表").encode(),
@@ -291,7 +312,10 @@ def run_serve(args) -> None:
             head = (f'<a href="/">← 概念列表</a><h2>{esc(name)}<span>'
                     f'图 {len(recs)} 张' + (f" · 目标 {tgt}" if tgt else "")
                     + f' · 已标注 {ann_n}</span></h2>'
-                    f'<p style="font-size:12px;color:#666">来源：{src_links}</p>')
+                    f'<p style="font-size:12px;color:#666">来源：{src_links}'
+                    + (f'｜分类：{esc(tax.get(name, ("", ""))[1])}'
+                       if tax.get(name) else "")
+                    + '</p>')
             self._send(page_html(head + docs_html
                                  + f'<div class="grid">{cards}</div>',
                                  f"· {name}").encode(),
