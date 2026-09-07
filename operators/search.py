@@ -840,7 +840,9 @@ class SearxngEngine:
 _ENGINES = (
     WikimediaZhEngine(), WikimediaEngine(), BaiduEngine(), AniListEngine(),
     MalEngine(), PixivEngine(), BingImagesEngine(), YandexImagesEngine(),
-    DeviantArtEngine(), HuabanApiEngine(), ToutiaoEngine(), So360Engine(),
+    DeviantArtEngine(), HuabanApiEngine(), ToutiaoEngine(),
+    # So360Engine(),   # 2026-09-07 下线：avg 6-7s 慢响应吃三成引擎墙钟仅出 4% 图；
+    # 类保留，恢复注册即可回滚。俄源改走 searxng 聚合（yandex images 已启用）。
     SearxngEngine(),
 )
 for _e in _ENGINES:
@@ -858,7 +860,7 @@ for _e in _ENGINES:
 # 挂载（language 参数对位 zh-CN/en）。
 _CHAR_SOURCES = ["bing_images", "yandex_images"]
 _LATIN_ONLY_SOURCES = ["pixiv"]
-_CN_CRAWLER_SOURCES = ["huaban_api", "toutiao", "so360"]
+_CN_CRAWLER_SOURCES = ["huaban_api", "toutiao"]   # so360 2026-09-07 下线（见 _ENGINES 注）
 _META_SOURCES = ["searxng"]
 
 ROUTE_TABLE: dict = {
