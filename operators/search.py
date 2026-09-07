@@ -58,6 +58,24 @@ API_UA = ("collect-v2/0.1 (research image collection; "
 
 K_SEMANTIC = 5        # 语义检索源（wikimedia/搜索爬虫）K 封顶
 K_STRUCTURED = 15     # 结构化源（inaturalist 等）K 封顶，后续源启用时生效
+# 聚合源预算放大倍数：折源终态前 zh 路由 7 源，searxng 单源承接等量预算
+_AGGREGATE_MULT = 7
+
+
+# 折源终态：searxng 上游引擎名 → 清单 source 键（与旧直连适配命名对齐，
+# 分析/下载头/限速表零迁移成本；未知引擎走通用下划线归一）
+_UPSTREAM_MAP = {
+    "huaban": "huaban_api",
+    "wikicommons.images": "wikimedia",
+    "wikicommons": "wikimedia",
+}
+
+
+def _normalize_upstream(engine_name) -> Optional[str]:
+    if not engine_name or not str(engine_name).strip():
+        return None
+    key = str(engine_name).strip().lower().replace(" ", "_")
+    return _UPSTREAM_MAP.get(key, key)
 
 
 def _int_or_none(v) -> Optional[int]:
@@ -779,7 +797,9 @@ class SearxngEngine:
     """
 
     name = "searxng"
-    k_cap = K_SEMANTIC
+    # 聚合层 K：合并上游引擎的候选预算（折源终态前 zh 路由 7 源 × K_SEMANTIC=5
+    # ≈ 35 候选/查询；searxng 单源承接需等量预算，否则单实例产量塌 7 倍）
+    k_cap = 35
     limits = net.SourceLimits(rate=10.0, concurrency=16)
     dl_limits = net.SourceLimits(rate=15.0, concurrency=32, proxy=True)
     _API = "http://127.0.0.1:8080/search"
@@ -814,19 +834,23 @@ class SearxngEngine:
             if key in seen:
                 continue
             seen.add(key)
-            tiers = [u for u in (img, res.get("thumbnail_src")) if u]
+            tiers = [u for u in (res.get("tiers")
+                    or [img, res.get("thumbnail_src")]) if u]
             resolution = str(res.get("resolution") or "")
             w, _, h = resolution.partition("x")
             out.append({
                 "tiers": tiers,
                 "landing": res.get("url") or None,
-                "width": _int_or_none(w) if resolution else None,
-                "height": _int_or_none(h) if resolution else None,
+                "width": _int_or_none(w.strip()) if resolution else None,
+                "height": _int_or_none(h.strip()) if resolution else None,
                 "mime": None,
-                "license": None,
-                "author": None,
+                "license": res.get("license") or None,
+                "author": res.get("author") or None,
                 "native": {"engine": res.get("engine"),
                         "title": res.get("title")},
+                # 折源终态：searxng 是传输层，溯源随结果走——上游引擎名
+                # 归一为清单 source 键（与旧直连适配命名对齐保分析连续）
+                "upstream": _normalize_upstream(res.get("engine")),
             })
             if len(out) >= k:
                 break
@@ -837,17 +861,33 @@ class SearxngEngine:
 # 引擎与限速注册（自声明式：import 期完成，检索闸+下载闸随引擎走）
 # ---------------------------------------------------------------------------
 
+# 折源终态（2026-09-07）：召回只留 searxng 聚合网关；直连引擎全部退役
+# （类保留，恢复注册 + ROUTE_TABLE 即回滚）。下载侧限速/头表仍按上游
+# 引擎名（清单 source）生效——折叠源键在此续登记，速率隔离不丢。
 _ENGINES = (
-    WikimediaZhEngine(), WikimediaEngine(), BaiduEngine(), AniListEngine(),
-    MalEngine(), PixivEngine(), BingImagesEngine(), YandexImagesEngine(),
-    DeviantArtEngine(), HuabanApiEngine(), ToutiaoEngine(),
-    # So360Engine(),   # 2026-09-07 下线：avg 6-7s 慢响应吃三成引擎墙钟仅出 4% 图；
-    # 类保留，恢复注册即可回滚。俄源改走 searxng 聚合（yandex images 已启用）。
+    # WikimediaZhEngine(), WikimediaEngine(), BaiduEngine(), AniListEngine(),
+    # MalEngine(), PixivEngine(), BingImagesEngine(), YandexImagesEngine(),
+    # DeviantArtEngine(), HuabanApiEngine(), ToutiaoEngine(),
+    # So360Engine(),
     SearxngEngine(),
 )
 for _e in _ENGINES:
     register_engine(_e)
     net.register_limits({_e.name: _e.limits, f"dl:{_e.name}": _e.dl_limits})
+
+# 折叠源下载闸续登记（检索已并入 searxng，下载按清单 source 查此表；
+# 未登记源走 net 默认无限制——这些源的 CDN 防盗链/速率历史经验保留）
+net.register_limits({
+    f"dl:{n}": lim for n, lim in {
+        "baidu": net.SourceLimits(rate=15.0, concurrency=32),
+        "toutiao": net.SourceLimits(rate=15.0, concurrency=32),
+        "huaban_api": net.SourceLimits(rate=15.0, concurrency=32),
+        "pixiv": net.SourceLimits(rate=15.0, concurrency=32),
+        "bing_images": net.SourceLimits(rate=15.0, concurrency=32),
+        "yandex_images": net.SourceLimits(rate=15.0, concurrency=32),
+        "wikimedia": net.SourceLimits(rate=6.0, concurrency=8),
+    }.items()
+})
 
 
 # ---------------------------------------------------------------------------
@@ -860,13 +900,15 @@ for _e in _ENGINES:
 # 挂载（language 参数对位 zh-CN/en）。
 _CHAR_SOURCES = ["bing_images", "yandex_images"]
 _LATIN_ONLY_SOURCES = ["pixiv"]
-_CN_CRAWLER_SOURCES = ["huaban_api", "toutiao"]   # so360 2026-09-07 下线（见 _ENGINES 注）
+_CN_CRAWLER_SOURCES = ["huaban_api", "toutiao"]
 _META_SOURCES = ["searxng"]
 
+# 折源终态（2026-09-07）：召回统一走 searxng 聚合网关（中文/专源以 demi_*
+# 引擎模块入仓维护，上游引擎名归一为清单 source）；直连适配全部退役，
+# 类保留可回滚（恢复 _ENGINES 注册 + 本表即可单源秒回直连）。
 ROUTE_TABLE: dict = {
-    "zh": ["baidu", "wikimedia_zh"] + _CN_CRAWLER_SOURCES + _CHAR_SOURCES
-          + _META_SOURCES,
-    "latin": ["wikimedia"] + _CHAR_SOURCES + _LATIN_ONLY_SOURCES + _META_SOURCES,
+    "zh": ["searxng"],
+    "latin": ["searxng"],
 }
 
 
@@ -903,7 +945,8 @@ class SearchStage(StreamStage):
         top_n = seed.get("top_n_hint") or self.top_n
         query = seed.get("query") or seed["name"]
         results = await asyncio.gather(*(
-            engine_search(s, query, self.k, lang=seed.get("lang", "zh"))
+            engine_search(s, query, self.k * (_AGGREGATE_MULT if s == "searxng" else 1),
+                          lang=seed.get("lang", "zh"))
             for s in sources), return_exceptions=True)
         out: list[dict] = []
         for source, rows in zip(sources, results):
@@ -911,9 +954,11 @@ class SearchStage(StreamStage):
                 if isinstance(rows, self.catch):
                     continue            # 单源认缺
                 raise rows              # 真异常（含网关 fail-fast）
-            for r in rows[:top_n]:      # 每源固定切片无补位
+            # 聚合源切片放大：searxng 单源承接原 7 直连源的候选/切片预算
+            mult = _AGGREGATE_MULT if source == "searxng" else 1
+            for r in rows[:top_n * mult]:   # 每源固定切片无补位
                 out.append({**seed,
-                            "source": source,
+                            "source": r.get("upstream") or source,
                             "tiers": r.get("tiers") or [],
                             "landing": r.get("landing"),
                             "width": r.get("width"),

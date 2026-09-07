@@ -27,3 +27,29 @@ search:
 # outgoing:
 #   proxies:
 #     all://: http://192.168.10.109:10808
+
+# demiwtg 中文/专源引擎（2026-09-07 折源终态：demi_* 模块，代码在仓内维护）
+engines:
+  - name: yandex images
+    disabled: false
+  - name: baidu
+    engine: demi_baidu
+    shortcut: bdu
+    categories: images
+    disabled: false
+  - name: toutiao
+    engine: demi_toutiao
+    shortcut: tta
+    categories: images
+    disabled: false
+  - name: huaban
+    engine: demi_huaban
+    shortcut: hbn
+    categories: images
+    disabled: false
+  - name: pixiv
+    engine: demi_pixiv
+    inactive: false   # 上游同名引擎 inactive:true，merge 会继承——必须显式覆盖
+    shortcut: pxv
+    categories: images
+    disabled: false

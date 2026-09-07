@@ -111,7 +111,9 @@ def request(query: str, params: "OnlineParams") -> None:
         "gsroffset": page_size * (params["pageno"] - 1),
         "gsrsearch": f"filetype:{filetype} {query}",
         # imageinfo: https://commons.wikimedia.org/w/api.php?action=help&modules=query%2Bimageinfo
-        "iiprop": "url|size|mime",
+        # demiwtg 2026-09-07：追加 extmetadata（LicenseShortName/Artist 授权溯源，
+        # 落清单 license/author 字段——直连 WikimediaEngine 折进来后授权链不断）
+        "iiprop": "url|size|mime|extmetadata",
         "iiurlheight": "180",  # needed for the thumb url
     }
     params["url"] = f"{wc_api_url}?{urlencode(args, safe=':|')}"
@@ -164,6 +166,10 @@ def response(resp: "SXNG_Response") -> EngineResults:
             continue
 
         if wc_search_type == "image":
+            # demiwtg 2026-09-07：extmetadata 授权溯源（LicenseShortName/Artist）
+            em = imageinfo.get("extmetadata") or {}
+            _license = (em.get("LicenseShortName") or {}).get("value")
+            _artist_raw = (em.get("Artist") or {}).get("value") or ""
             res.add(
                 res.types.LegacyResult(
                     template="images.html",
@@ -175,6 +181,8 @@ def response(resp: "SXNG_Response") -> EngineResults:
                     resolution=f"{imageinfo['width']} x {imageinfo['height']}",
                     img_format=imageinfo["mime"],
                     filesize=size,
+                    license=_license,
+                    author=html_to_text(_artist_raw) if _artist_raw else None,
                 )
             )
             continue
