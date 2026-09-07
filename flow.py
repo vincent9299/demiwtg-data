@@ -185,28 +185,11 @@ def image_line(args, ctx: dict) -> object:
     reconfigure_endpoint("demiwtg_vlm", max_connections=args.vlm_concurrency + 8)
 
     # 管线声明（链式 Dataset API）：算子构造时以实例属性覆盖并发/深度
-    # （策略默认值在算子类上）。每轮重建（配额循环多轮各自事件循环——
-    # Sink 持有 loop 绑定的锁，跨轮复用会炸；重建后 load_index 吸收
-    # 上一轮行，去重语义不变）。
+    # （策略默认值在算子类上）。
     def _tune(stage, concurrency, depth):
         stage.concurrency, stage.queue_depth = concurrency, depth
         return stage
 
-    def _build_stages():
-        seed_stage = (concepts_mod.ConceptSeedStage()
-                      if ctx["concept_mode"] else seed.SeedStage(cache))
-        sink_ = annotate.ManifestSink(args.dataset,
-                                      manifest_name=ctx["manifest_name"])
-        sink_.load_index()
-        return [(_tune(seed_stage, args.instance_concurrency,
-                       args.instance_concurrency * 4)),
-                _tune(search.SearchStage(args.top_n,
-                                         args.k or search.K_SEMANTIC),
-                      args.search_concurrency, args.download_concurrency * 4),
-                _tune(download.DownloadStage(args.blob_root or args.dataset),
-                      args.download_concurrency, args.vlm_concurrency),
-                _tune(annotate.AnnotateSinkStage(sink_, kb),
-                      args.vlm_concurrency, None)]   # 深度=并发（字节上界）
     t0 = time.time()
     n = len(ctx["insts"])
 
@@ -224,16 +207,33 @@ def image_line(args, ctx: dict) -> object:
         cache.save()                   # 同步落盘最前（中断路径 await 可能截断）
         _telemetry_dump(args.dataset)
 
-    def _run_once(rows):
-        s = _build_stages()
+    # 配额一轮 = 新链：算子持 loop 绑定资源（Sink 锁/浏览器），跨轮
+    # 复用会炸；重构造后 load_index 吸收上一轮行，去重语义不变。
+    def _image_run(rows):
+        sink_ = annotate.ManifestSink(args.dataset,
+                                      manifest_name=ctx["manifest_name"])
+        sink_.load_index()
+        seed_stage = (concepts_mod.ConceptSeedStage()
+                      if ctx["concept_mode"] else seed.SeedStage(cache))
+        line = (
+            _tune(seed_stage, args.instance_concurrency,
+                  args.instance_concurrency * 4),
+            _tune(search.SearchStage(args.top_n,
+                                     args.k or search.K_SEMANTIC),
+                  args.search_concurrency, args.download_concurrency * 4),
+            _tune(download.DownloadStage(args.blob_root or args.dataset),
+                  args.download_concurrency, args.vlm_concurrency),
+            _tune(annotate.AnnotateSinkStage(sink_, kb),
+                  args.vlm_concurrency, None),   # 深度=并发（字节上界）
+        )
         stats = (local_data().from_items(rows)
-                 .map_stage(s[0]).map_stage(s[1])
-                 .map_stage(s[2]).map_stage(s[3])
+                 .map_stage(line[0]).map_stage(line[1])
+                 .map_stage(line[2]).map_stage(line[3])
                  .run_stream(on_progress=on_progress, on_drain=on_drain,
                              log_every=args.log_every))
-        return s, stats
+        return line, stats
 
-    stages, engine_stats = _run_once(ctx["insts"])
+    stages, engine_stats = _image_run(ctx["insts"])
     quota_passes = max(1, args.quota_passes) if ctx["concept_mode"] else 1
     if quota_passes > 1:
         from operators.concepts import concept_coverage
@@ -247,7 +247,7 @@ def image_line(args, ctx: dict) -> object:
                   f"概念达标，重跑 {len(under)} 个不足概念", flush=True)
             if not under:
                 break
-            _, engine_stats = _run_once(under)
+            _, engine_stats = _image_run(under)
     return engine_stats, stages, t0
 
 
