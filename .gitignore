@@ -3,7 +3,6 @@ __pycache__/
 state/
 logs/
 webgate/.venv/
-webgate/searxng/
 webgate/log/
 webgate/run/
 webgate/settings.yml
