@@ -23,7 +23,7 @@ import os
 import time
 
 from operators.page import BaseIngestStage, DocsSinkStage
-from demiflow.standalone import local_data, run_stages
+from demiflow.standalone import local_data
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATASET = "/lhcos-data/demiwtg-data/datasets/demiwtg"
@@ -59,13 +59,16 @@ def main() -> None:
     if not rows:
         return
 
-    stages = [BaseIngestStage(args.blob_root),
-              DocsSinkStage(args.dataset, args.manifest)]
+    def _tune(stage, c, q):
+        stage.concurrency, stage.queue_depth = c, q
+        return stage
+
+    stages = [_tune(BaseIngestStage(args.blob_root), 8, 16),
+              _tune(DocsSinkStage(args.dataset, args.manifest), 4, None)]
     t0 = time.time()
-    stats = run_stages(local_data(), rows, stages,
-                       concurrency={"base_ingest": (8, 16),
-                                   "docs_sink": (4, None)},
-                       log_every=5000)
+    stats = (local_data().from_items(rows)
+             .map_stage(stages[0]).map_stage(stages[1])
+             .run_stream(log_every=5000))
     print(f"[import] 完成，耗时 {(time.time()-t0)/60:.1f} 分钟："
           f"落 docs {stages[1].sunk} 行；{stats.summary()}")
 

@@ -9,8 +9,9 @@
   text_engines.TextSearchStage  种子行 → 页面候选行（相关性门）
   page.PageFetchStage 等        docs 线页面图文一体采集
 
-平台（demiflow）：StreamStage 规范 / run_stages 编排入口（并发覆盖 +
-退出期资源收尾）/ LLM 端点注册表 / HTTP 双池限速 / scan_counts 续跑现算。
+平台（demiflow）：StreamStage 规范 / Dataset 链式 API（map_stage +
+run_stream，退出期资源收尾在终结动作）/ LLM 端点注册表 / HTTP 双池限速 /
+scan_counts 续跑现算。
 
 运行：PYTHONPATH=<仓库根> python3 -m flow --limit 200
 """
