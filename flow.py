@@ -173,7 +173,7 @@ def image_line(args, ctx: dict) -> object:
     """图像线：管线声明 + 配额循环。返回最终一轮 StreamStats。"""
     from operators import annotate, concepts as concepts_mod, download, search, seed
     from demiflow.collect.llm import reconfigure_endpoint
-    from demiflow.standalone import local_data, run_stages
+    from demiflow.standalone import local_data
 
     cache = seed.SeedCache(ctx["alias_cache"])
     if ctx["concept_mode"]:
@@ -183,28 +183,29 @@ def image_line(args, ctx: dict) -> object:
         kb = annotate.load_instance_kb(args.instances)
     reconfigure_endpoint("demiwtg_vlm", max_connections=args.vlm_concurrency + 8)
 
-    # 算子列表 = 管线声明（策略默认值在算子类上，此处只覆盖并发）。
-    # 每轮重建（配额循环多轮各自事件循环——Sink 持有 loop 绑定的锁，
-    # 跨轮复用会炸；重建后 load_index 吸收上一轮行，去重语义不变）
+    # 管线声明（链式 Dataset API）：算子构造时以实例属性覆盖并发/深度
+    # （策略默认值在算子类上）。每轮重建（配额循环多轮各自事件循环——
+    # Sink 持有 loop 绑定的锁，跨轮复用会炸；重建后 load_index 吸收
+    # 上一轮行，去重语义不变）。
+    def _tune(stage, concurrency, depth):
+        stage.concurrency, stage.queue_depth = concurrency, depth
+        return stage
+
     def _build_stages():
         seed_stage = (concepts_mod.ConceptSeedStage()
                       if ctx["concept_mode"] else seed.SeedStage(cache))
         sink_ = annotate.ManifestSink(args.dataset,
                                       manifest_name=ctx["manifest_name"])
         sink_.load_index()
-        return [seed_stage,
-                search.SearchStage(args.top_n,
-                                   args.k or search.K_SEMANTIC),
-                download.DownloadStage(args.blob_root or args.dataset),
-                annotate.AnnotateSinkStage(sink_, kb)]
-
-    stages = _build_stages()
-    concurrency = {
-        "seed": (args.instance_concurrency, args.instance_concurrency * 4),
-        "search": (args.search_concurrency, args.download_concurrency * 4),
-        "download": (args.download_concurrency, args.vlm_concurrency),
-        "annotate_sink": (args.vlm_concurrency, None),   # 深度=并发（字节上界）
-    }
+        return [(_tune(seed_stage, args.instance_concurrency,
+                       args.instance_concurrency * 4)),
+                _tune(search.SearchStage(args.top_n,
+                                         args.k or search.K_SEMANTIC),
+                      args.search_concurrency, args.download_concurrency * 4),
+                _tune(download.DownloadStage(args.blob_root or args.dataset),
+                      args.download_concurrency, args.vlm_concurrency),
+                _tune(annotate.AnnotateSinkStage(sink_, kb),
+                      args.vlm_concurrency, None)]   # 深度=并发（字节上界）
     t0 = time.time()
     n = len(ctx["insts"])
 
@@ -223,14 +224,15 @@ def image_line(args, ctx: dict) -> object:
         _telemetry_dump(args.dataset)
 
     def _run_once(rows):
-        nonlocal stages
-        stages = _build_stages()
-        return run_stages(local_data(), rows, stages,
-                          concurrency=concurrency,
-                          on_progress=on_progress, on_drain=on_drain,
-                          log_every=args.log_every)
+        s = _build_stages()
+        stats = (local_data().from_items(rows)
+                 .map_stage(s[0]).map_stage(s[1])
+                 .map_stage(s[2]).map_stage(s[3])
+                 .run_stream(on_progress=on_progress, on_drain=on_drain,
+                             log_every=args.log_every))
+        return s, stats
 
-    engine_stats = _run_once(ctx["insts"])
+    stages, engine_stats = _run_once(ctx["insts"])
     quota_passes = max(1, args.quota_passes) if ctx["concept_mode"] else 1
     if quota_passes > 1:
         from operators.concepts import concept_coverage
@@ -244,7 +246,7 @@ def image_line(args, ctx: dict) -> object:
                   f"概念达标，重跑 {len(under)} 个不足概念", flush=True)
             if not under:
                 break
-            engine_stats = _run_once(under)
+            _, engine_stats = _run_once(under)
     return engine_stats, stages, t0
 
 
@@ -258,7 +260,11 @@ def docs_line(args, ctx: dict) -> tuple:
     from operators.page import DocsSinkStage, InlineImageStage, PageFetchStage
     from operators.seed import RowSeedStage
     from operators.text_engines import TextSearchStage
-    from demiflow.standalone import local_data, run_stages
+    from demiflow.standalone import local_data
+
+    def _tune(stage, concurrency, depth):
+        stage.concurrency, stage.queue_depth = concurrency, depth
+        return stage
 
     text_rows = [c for c in ctx["all_rows"] if c["carriers"] != "image"]
     if not text_rows:
@@ -269,20 +275,22 @@ def docs_line(args, ctx: dict) -> tuple:
     aliases_map = {c["name"]: c["aliases"] for c in ctx["all_rows"]}
 
     def _docs_run(rows, seed_stage=None):
-        st = [seed_stage or concepts_mod.ConceptSeedStage(),
-              TextSearchStage(per_query=3, aliases_by_name=aliases_map),
-              PageFetchStage(share, max_pages_per_concept=args.docs_pages),
-              InlineImageStage(share),
-              DocsSinkStage(args.dataset, docs_name)]
-        stats = run_stages(local_data(), rows, st,
-                           concurrency={
-                               "seed": (8, 32),
-                               "text_search": (8, 48),
-                               "pages": (4, 8),
-                               "inline": (8, 16),
-                               "docs_sink": (4, None),
-                           }, log_every=args.log_every)
-        return st, stats
+        # 管线声明（链式 Dataset API）：docs 线并发策略在此实例化
+        stages_list = (
+            _tune(seed_stage or concepts_mod.ConceptSeedStage(), 8, 32),
+            _tune(TextSearchStage(per_query=3,
+                                  aliases_by_name=aliases_map), 8, 48),
+            _tune(PageFetchStage(share,
+                                 max_pages_per_concept=args.docs_pages), 4, 8),
+            _tune(InlineImageStage(share), 8, 16),
+            _tune(DocsSinkStage(args.dataset, docs_name), 4, None),
+        )
+        stats = (local_data().from_items(rows)
+                 .map_stage(stages_list[0]).map_stage(stages_list[1])
+                 .map_stage(stages_list[2]).map_stage(stages_list[3])
+                 .map_stage(stages_list[4])
+                 .run_stream(log_every=args.log_every))
+        return list(stages_list), stats
 
     print(f"[flow] docs 线启动：{len(text_rows)} 概念（含 text-only），"
           f"清单 {docs_name}", flush=True)
