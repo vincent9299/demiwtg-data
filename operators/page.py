@@ -253,37 +253,94 @@ class PageFetchStage(StreamStage):
         url = row["page_url"]
         sha = _sha(url)
         md_path = os.path.join(self.root, "pages", sha[:2], f"{sha}.md")
+        body_kind = "full"
         if os.path.exists(md_path):
             markdown = open(md_path, encoding="utf-8", errors="replace").read()
         else:
             if not _robots_allows(url):   # robots.txt 门（2026-09-07 合规）
-                return None               # 禁抓即认缺，不留缓存（下次重查）
-            wiki_md = await _wiki_extract(url)
-            if wiki_md is not None:
-                markdown = wiki_md        # wiki 直取纯文本（无导航栏）
+                # 合规兜底链：② Wayback 存档全文 → ① SERP snippet 定义级
+                wb_md = await self._wayback_fetch(url)
+                if wb_md is not None:
+                    markdown, body_kind = wb_md, "wayback"
+                else:
+                    return self._snippet_row(row, sha)   # None=snippet 也不够格
             else:
-                if self._crawler is None:
-                    self._crawler = PageCrawler(proxy=self._proxy,
-                                                page_timeout=self._timeout)
-                    await self._crawler.__aenter__()
-                page = await self._crawler.fetch(url)
-                if page is None:
-                    return None           # 抓取认缺
-                markdown = page["markdown"]
-                if page.get("title") and not row.get("title"):
-                    row["title"] = page["title"]
+                wiki_md = await _wiki_extract(url)
+                if wiki_md is not None:
+                    markdown = wiki_md        # wiki 直取纯文本（无导航栏）
+                else:
+                    page = await self._crawler_fetch(url)
+                    if page is None:
+                        return self._snippet_row(row, sha)   # 抓取失败同兜底
+                    markdown = page["markdown"]
+                    if page.get("title") and not row.get("title"):
+                        row["title"] = page["title"]
             await asyncio.to_thread(atomic_write_bytes, md_path,
                                     markdown.encode("utf-8"))
             self.pages += 1
         passages = quality_gate(extract_passages(markdown))
         if passages is None:
-            return None               # 壳页质量门：导航/空壳/登录墙拒收
+            return self._snippet_row(row, sha) or None
+                # 壳页质量门：导航/空壳/登录墙拒收——snippet 兜底再给一次机会
         self._fetched[concept] = self._fetched.get(concept, 0) + 1
         n_imgs = sum(len(p["images"]) for p in passages)
         return {**row, "page_sha": sha,
                 "passages": passages,
                 "path": f"pages/{sha[:2]}/{sha}.md",
-                "n_images": n_imgs}
+                "n_images": n_imgs, "body": body_kind}
+
+    async def _crawler_fetch(self, url: str):
+        """浏览器抓取（惰性初始化爬虫，wayback 复用同一实例）。"""
+        if self._crawler is None:
+            self._crawler = PageCrawler(proxy=self._proxy,
+                                        page_timeout=self._timeout)
+            await self._crawler.__aenter__()
+        return await self._crawler.fetch(url)
+
+    _wayback_last = 0.0    # 进程级配速（archive 礼貌预算）
+
+    async def _wayback_fetch(self, url: str):
+        """② robots 拒抓页的 Wayback 存档兜底：web.archive.org/web/<url>。
+
+        CDX/前端有 429 限流——进程级 ≥1.5s 配速；失败返回 None 交回
+        snippet 兜底。归档页走正常质量门（全文按质验收）。
+        """
+        now = time.monotonic()
+        wait = PageFetchStage._wayback_last + 1.5 - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        PageFetchStage._wayback_last = time.monotonic()
+        try:
+            page = await self._crawler_fetch(f"https://web.archive.org/web/{url}")
+            md = (page or {}).get("markdown") or ""
+            if len(md) > 400:              # 存档缺页/错误页过滤
+                return md
+        except Exception:                  # noqa: BLE001 - 归档失败交 snippet
+            pass
+        return None
+
+    def _snippet_row(self, row: dict, sha):
+        """① SERP snippet 兜底：检索摘要升格为定义级 docs 行。
+
+        robots 拒抓/Wayback 无档/抓取失败/壳页拒收四路的最后回收——
+        snippet 是引擎侧摘要（可信度较高），行带 body="snippet" 标记
+        供下游分层（正文级 vs 定义级）；passages 置空，不过质量门。
+        """
+        snippet = (row.get("snippet") or "").strip()
+        if len(snippet) < 30:
+            return None
+        content = (f"# {row.get('title') or row.get('name', '')}\n\n"
+                   + snippet)
+        md_path = os.path.join(self.root, "pages", sha[:2], f"{sha}.md")
+        try:
+            atomic_write_bytes(md_path, content.encode("utf-8"))
+        except OSError:
+            pass                            # 落盘失败不阻断（行仍有效）
+        self.pages += 1
+        self._fetched[row["name"]] = self._fetched.get(row["name"], 0) + 1
+        return {**row, "page_sha": sha, "passages": [],
+                "path": f"pages/{sha[:2]}/{sha}.md",
+                "n_images": 0, "body": "snippet"}
 
     async def aclose(self):
         if self._crawler is not None:

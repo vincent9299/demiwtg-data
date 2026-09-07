@@ -60,3 +60,8 @@ engines:
     disabled: false
   - name: bing
     disabled: false
+  - name: 360baike
+    engine: demi_360baike
+    shortcut: bk3
+    categories: general
+    disabled: false
