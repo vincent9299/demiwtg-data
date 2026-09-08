@@ -7,3 +7,4 @@ webgate/log/
 webgate/run/
 webgate/settings.yml
 .qoder/
+cn_key/

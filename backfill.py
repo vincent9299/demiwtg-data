@@ -42,6 +42,7 @@ for _k in list(os.environ):
     if "proxy" in _k.lower():
         del os.environ[_k]
 
+from demiflow.collect import net
 from demiflow.collect.fetch import fetch_tiers
 from demiflow.collect.store import atomic_write_bytes
 from demiflow.data.plan import StreamStage
@@ -130,7 +131,11 @@ class BackfillStage(StreamStage):
                 hard_timeout=DOWNLOAD_HARD_TIMEOUT,
                 headers=download_headers_for(src),
                 verify=None)          # sha 闸门在业务面比（非内容类型拒收）
-        except Exception as exc:      # noqa: BLE001 - 全部网络类确定性失败
+        except net.TransientExhaustedError:
+            # 瞬态（限速预算耗尽/读流抖动）：认缺不记死信，重跑自然重试
+            # （2026-09-08 教训：并发 48 时 1.8 万行被误记死信）
+            return None
+        except Exception as exc:      # noqa: BLE001 - 其余网络类确定性失败
             await self.sink.dead(row, f"net:{type(exc).__name__}")
             return None
         if got is None:
@@ -140,8 +145,11 @@ class BackfillStage(StreamStage):
             await self.sink.dead(row, "sha_mismatch")
             return None
         import asyncio
-        await asyncio.to_thread(
-            atomic_write_bytes, os.path.join(self.blob_root, rel), got.data)
+        try:
+            await asyncio.to_thread(
+                atomic_write_bytes, os.path.join(self.blob_root, rel), got.data)
+        except OSError:
+            return None              # cosfs 抖动：认缺不记死信，重跑幂等续上
         out = {
             "concepts": row["c"], "source": src, "content_url": url,
             "sha256": s, "ext": ext, "blob_path": rel,

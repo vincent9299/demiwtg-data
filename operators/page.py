@@ -3,11 +3,14 @@
 行契约：
 - 页面候选行（读）：{name, page_url, title, authority, query}
 - 页面产物行（PageFetchStage 产）：+ {page_sha, passages[]（段落+绑定图）,
-  path}；markdown 原文落 pages/<aa>/<sha256(url)>.md（内容寻址，跨概念
-  共享去重——抽取只做一次）
+  path, content_sha, page_bytes}；markdown 原文落 pages/<aa>/<sha256(url)>.md
+  （**URL 寻址**，同 URL 重抓覆盖——跨概念共享去重，抽取只做一次）；
+  content_sha/page_bytes = 所落字节的内容哈希与长度（2026-09-09 增：
+  页面按 URL 寻址而非内容寻址，湖侧回灌需要内容级闸门就得在源头记账——
+  旧行缺这两键，湖侧降级宽松门）
 - docs 清单行（DocsSinkStage）：{page_sha, url, concepts, authority,
-  title, path, n_passages, n_images, fetched_at}（分片单写者，与图像线
-  同款幂等追加）
+  title, path, content_sha, page_bytes, n_passages, n_images, fetched_at}
+  （分片单写者，与图像线同款幂等追加）
 """
 
 from __future__ import annotations
@@ -207,16 +210,18 @@ class BaseIngestStage(StreamStage):
         url = row.get("url") or f"offline:{row.get('title', '')}"
         sha = _h.sha256(url.encode("utf-8")).hexdigest()
         md_path = os.path.join(self.root, "pages", sha[:2], f"{sha}.md")
+        data = row["text"].encode("utf-8")
         if not os.path.exists(md_path):
             await asyncio.to_thread(
-                atomic_write_bytes, md_path,
-                row["text"].encode("utf-8"))
+                atomic_write_bytes, md_path, data)
         passages = quality_gate(extract_passages(row["text"]))
         if passages is None:
             return None
         return {**row, "page_sha": sha,
                 "passages": passages,
                 "path": f"pages/{sha[:2]}/{sha}.md",
+                "content_sha": _h.sha256(data).hexdigest(),
+                "page_bytes": len(data),
                 "authority": row.get("authority", "offline-dump"),
                 "n_images": sum(len(p["images"]) for p in passages)}
 
@@ -255,7 +260,8 @@ class PageFetchStage(StreamStage):
         md_path = os.path.join(self.root, "pages", sha[:2], f"{sha}.md")
         body_kind = "full"
         if os.path.exists(md_path):
-            markdown = open(md_path, encoding="utf-8", errors="replace").read()
+            data = open(md_path, "rb").read()
+            markdown = data.decode("utf-8", errors="replace")
         else:
             if not _robots_allows(url):   # robots.txt 门（2026-09-07 合规）
                 # 合规兜底链：② Wayback 存档全文 → ① SERP snippet 定义级
@@ -278,6 +284,7 @@ class PageFetchStage(StreamStage):
             await asyncio.to_thread(atomic_write_bytes, md_path,
                                     markdown.encode("utf-8"))
             self.pages += 1
+        data = markdown.encode("utf-8")   # 落盘/已读字节（content_sha 记账）
         passages = quality_gate(extract_passages(markdown))
         if passages is None:
             return self._snippet_row(row, sha) or None
@@ -287,6 +294,8 @@ class PageFetchStage(StreamStage):
         return {**row, "page_sha": sha,
                 "passages": passages,
                 "path": f"pages/{sha[:2]}/{sha}.md",
+                "content_sha": hashlib.sha256(data).hexdigest(),
+                "page_bytes": len(data),
                 "n_images": n_imgs, "body": body_kind}
 
     async def _crawler_fetch(self, url: str):
@@ -331,15 +340,18 @@ class PageFetchStage(StreamStage):
             return None
         content = (f"# {row.get('title') or row.get('name', '')}\n\n"
                    + snippet)
+        data = content.encode("utf-8")
         md_path = os.path.join(self.root, "pages", sha[:2], f"{sha}.md")
         try:
-            atomic_write_bytes(md_path, content.encode("utf-8"))
+            atomic_write_bytes(md_path, data)
         except OSError:
             pass                            # 落盘失败不阻断（行仍有效）
         self.pages += 1
         self._fetched[row["name"]] = self._fetched.get(row["name"], 0) + 1
         return {**row, "page_sha": sha, "passages": [],
                 "path": f"pages/{sha[:2]}/{sha}.md",
+                "content_sha": _sha(content),
+                "page_bytes": len(data),
                 "n_images": 0, "body": "snippet"}
 
     async def aclose(self):
@@ -437,6 +449,8 @@ class DocsSinkStage(StreamStage):
             "concepts": row.get("concepts") or [row["name"]],
             "authority": row.get("authority"),
             "title": row.get("title"), "path": row.get("path"),
+            "content_sha": row.get("content_sha"),
+            "page_bytes": row.get("page_bytes"),
             "n_passages": len(row.get("passages") or []),
             "n_images": sum(len(p.get("images") or [])
                             for p in row.get("passages") or []),

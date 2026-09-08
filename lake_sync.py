@@ -1,25 +1,43 @@
-"""增量回湖管线（lake 常驻，2026-09-08）：七采集节点 → 湖侧 blob 店。
+"""增量回湖管线（lake 常驻，2026-09-08）：采集节点 → 湖侧资产店。
 
 模型（对齐 demi 理念：内容寻址即账本 / 幂等现算 / 断点续跑 / 单写者）：
 - 清单增量镜像：每 (节点, 清单文件) 记字节偏移，tail 取增量，只消费完整行
   （轮转/重建检测：远端小于偏移则归零重读）；mirror 落 sync/manifests/<node>/
 - 缺集现算：mirror 行取 blob_path/sha256；**湖侧 blob 实存 = 已同步**
   （内容寻址天然幂等，无独立传输账本）
-- 拉取：tar 流（blob 已压缩，不 gzip）；SG 组五机按哈希桶前缀 aa 分摊，
-  CN 组只走 E（E/F 共享 GZ 桶）；先落临时区，逐文件 sha256 复验后原子发布
-- 回执清理（防重下闭环）：
+- 拉取：tar 流（blob 已压缩，不 gzip）；两组均按哈希桶前缀 aa 分摊到组内
+  全部 readers（SG 五口、CN 五口——CN 五机共享 GZ 桶，实测 g 的 blob 在
+  e 上可见）；先落临时区，逐文件 sha256 复验后原子发布
+- 回执清理（防重下闭环，**仅 blobs；pages 暂不清理**——集群侧 pages
+  去重账本口径未确认前保守）：
   1) sha 写组共享桶 meta/synced_shas.jsonl（**先记账后删**，采集端凭它跳过）
-  2) 再删组 COS 原对象（cosfs rm = 组内全可见；SG 五机共享一桶、E/F 共享一桶）
+  2) 再删组 COS 原对象（cosfs rm = 组内全可见）
   仅清理「已校验 + 过宽限期 + 湖侧仍在」的 blob，每轮限量
 - 采集端对接：backfill --synced-ledger 读 synced_shas.jsonl 跳过；
   flow 的概念覆盖按清单计数，天然不受删除影响
 
-状态（sync/）：state.json（偏移）/ verified.jsonl（{sha,ts} 追加）/ deleted.jsonl /
-sync.log（轮摘要 jsonl）。全 stdlib，湖 pod 直跑。
+2026-09-09 pages 回湖（docs 线正文，知识优先于图片）：
+- 两类资产两套寻址：blobs=内容寻址（sha=内容哈希，强复验）；
+  pages=URL 寻址（page.py：page_sha=sha256(url)，同 URL 重抓覆盖同名文件）
+- 闸门版本化：docs 行自 2026-09-09 起带 content_sha/page_bytes
+  （operators/page.py 记录），湖侧**强门**=sha256(内容)==content_sha；
+  旧行缺 content_sha → 宽松门（非空 + 文件名 stem==page_sha 的身份自洽
+  + sha256(url)==page_sha 行校验）。URL 寻址下内容本可漂移，强门只对
+  新数据成立（闸门与数据同期升级，可追溯）
+- 跨组全局去重：同 rel（=同 URL 的页面文件）先到组先得（GROUPS 序，
+  sg 优先），修「同页被 sg/cn 各拉一次」的重复账（首轮实测 29 页）
+- verified_pages.jsonl：拉取审计 + 未来 pages 清理的 pending 基底
+  （与 verified.jsonl 同构——拉取路径只认湖侧实存，不读它）
+- cycle 内 pages 先于 blobs：知识正文不该排在图片积压之后（当前串行，
+  pages 积压变大时再议分轮/并发——会撞 state.json 单写者假设）
+
+状态（sync/）：state.json（偏移）/ verified.jsonl + verified_pages.jsonl
+（审计追加）/ deleted.jsonl / sync.log（轮摘要 jsonl）。全 stdlib，湖 pod 直跑。
 
 用法：
     python3 lake_sync.py --once            # 单轮（测试）
     python3 lake_sync.py                   # 常驻：每小时一轮
+    python3 lake_sync.py --once --pages-only               # 只补 pages
     python3 lake_sync.py --once --max-batches 2 --no-cleanup   # 冒烟
 """
 
@@ -30,6 +48,7 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import time
 
 # ---------------------------------------------------------------------------
@@ -46,15 +65,19 @@ GROUPS = {
     "sg": {"readers": ["sg-master", "pipeline-a", "pipeline-b",
                        "pipeline-c", "pipeline-d"],
            "blob_root": "/lhcos-data/demiwtg-data/datasets/demiwtg/blobs",
+           "pages_root": "/lhcos-data/demiwtg-data/datasets/demiwtg/pages",
            "ledger": "/lhcos-data/demiwtg-data/meta/synced_shas.jsonl"},
-    "cn": {"readers": ["pipeline-e"],          # E/F 共享 GZ 桶，一台即可
+    "cn": {"readers": ["pipeline-e", "pipeline-f", "pipeline-g",
+                       "pipeline-h", "pipeline-i"],   # 五机共享 GZ 桶，五口分摊
            "blob_root": "/lhcos-data/demiwtg-data/datasets/demiwtg/blobs",
+           "pages_root": "/lhcos-data/demiwtg-data/datasets/demiwtg/pages",
            "ledger": "/lhcos-data/demiwtg-data/meta/synced_shas.jsonl"},
 }
 NODE_GROUP = {  # 清单来自哪台 → blob 在哪个组的桶
     "sg-master": "sg", "pipeline-a": "sg", "pipeline-b": "sg",
     "pipeline-c": "sg", "pipeline-d": "sg",
     "pipeline-e": "cn", "pipeline-f": "cn",
+    "pipeline-g": "cn", "pipeline-h": "cn", "pipeline-i": "cn",
 }
 REMOTE_META = "~/lake/meta"                   # 各节点清单根（本地盘）
 
@@ -84,6 +107,7 @@ class State:
     def __init__(self, root: str):
         os.makedirs(f"{root}/manifests", exist_ok=True)
         os.makedirs(f"{root}/tmp", exist_ok=True)
+        self._wlock = threading.Lock()   # 组并行拉取下的审计追加互斥
         self.path = f"{root}/state.json"
         self.offsets: dict = {}
         if os.path.exists(self.path):
@@ -96,6 +120,16 @@ class State:
                     r = json.loads(line)
                     self.verified.setdefault(r["sha"], {"ts": r["ts"],
                                                         "group": r.get("group", "sg")})
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        self.verified_pages: dict = {}   # sha -> {"ts","group"}（pages 审计；
+        vp = f"{root}/verified_pages.jsonl"   # 拉取路径只认湖侧实存，同 verified 同构）
+        if os.path.exists(vp):
+            for line in open(vp, encoding="utf-8"):
+                try:
+                    r = json.loads(line)
+                    self.verified_pages.setdefault(
+                        r["sha"], {"ts": r["ts"], "group": r.get("group", "sg")})
                 except (json.JSONDecodeError, KeyError):
                     continue
         self.deleted: set = set()
@@ -116,15 +150,27 @@ class State:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def append_verified(self, sha: str, group: str) -> None:
-        self.verified[sha] = {"ts": time.time(), "group": group}
-        with open(f"{SYNC_ROOT}/verified.jsonl", "a") as f:
-            f.write(json.dumps({"sha": sha, "ts": self.verified[sha]["ts"],
-                                "group": group}) + "\n")
+        with self._wlock:
+            self.verified[sha] = {"ts": time.time(), "group": group}
+            with open(f"{SYNC_ROOT}/verified.jsonl", "a") as f:
+                f.write(json.dumps({"sha": sha, "ts": self.verified[sha]["ts"],
+                                    "group": group}) + "\n")
+
+    def append_verified_page(self, sha: str, got_sha: str, group: str) -> None:
+        """pages 拉取审计：got_sha=实收内容的哈希（URL 寻址下内容可漂移，
+        收到什么记什么，供对账/未来清理 pending 用）。"""
+        with self._wlock:
+            self.verified_pages[sha] = {"ts": time.time(), "group": group}
+            with open(f"{SYNC_ROOT}/verified_pages.jsonl", "a") as f:
+                f.write(json.dumps({"sha": sha, "got": got_sha,
+                                    "ts": self.verified_pages[sha]["ts"],
+                                    "group": group}) + "\n")
 
     def append_deleted(self, sha: str) -> None:
-        self.deleted.add(sha)
-        with open(f"{SYNC_ROOT}/deleted.jsonl", "a") as f:
-            f.write(json.dumps({"sha": sha}) + "\n")
+        with self._wlock:
+            self.deleted.add(sha)
+            with open(f"{SYNC_ROOT}/deleted.jsonl", "a") as f:
+                f.write(json.dumps({"sha": sha}) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -233,8 +279,13 @@ def pull_group(state: State, group: str, rels: set, max_batches: int) -> dict:
             # 组 blobs 根，成员去掉 blobs/ 前缀
             members = [r_[len("blobs/"):] for r_ in batch]
             payload = ("\n".join(members) + "\n").encode()
+            t_batch = time.time()
             r = ssh_run(reader, f'tar -C {blob_root} --ignore-failed-read '
-                                '-cf - -T -', stdin=payload, timeout=3600)
+                                '-cf - -T -', stdin=payload, timeout=900)
+            print(f"[sync] blob批 {reader} #{batches}（{len(batch)}）："
+                  f"{time.time() - t_batch:.0f}s "
+                  f"ok={stat['ok']} bad={stat['bad']} fail={stat['fail']}",
+                  flush=True)
             if r.returncode != 0:
                 stat["fail"] += len(batch)
                 print(f"[sync] {reader} tar 流失败（{len(batch)} 文件）："
@@ -266,6 +317,132 @@ def pull_group(state: State, group: str, rels: set, max_batches: int) -> dict:
                 os.replace(src, dst)
                 state.append_verified(sha, group)
                 stat["ok"] += 1
+    return stat
+
+
+# ---------------------------------------------------------------------------
+# ③' pages 缺集现算与拉取（URL 寻址；docs 线正文，2026-09-09）
+# ---------------------------------------------------------------------------
+
+def needed_pages(state: State) -> tuple:
+    """镜像 docs* 行 → ({group: {rel: content_sha|None}}, 行闸门不符数)。
+
+    行闸门（身份自洽，URL 寻址的验法）：page_sha == sha256(url)，不符
+    计数跳过（镜像脏行/字段漂移）。湖侧实存 = 已同步（与 blobs 同口径，
+    不读 verified_pages）。**跨组全局去重**：同 rel（同 URL 的页面文件，
+    sg/cn 两队都可能抓过）先到组先得——按 GROUPS 序 sg 优先，修首轮
+    实测的同页双拉（29/10,049）。content_sha 缺省（2026-09-09 前旧行）
+    → 拉取端降级宽松门。
+    """
+    claims: dict = {}                # rel -> (group, content_sha|None)
+    mismatch = 0
+    for group in GROUPS:             # GROUPS 序即组优先序（sg 先claim）
+        for node, node_group in NODE_GROUP.items():
+            if node_group != group:
+                continue
+            mdir = f"{SYNC_ROOT}/manifests/{node}"
+            if not os.path.isdir(mdir):
+                continue
+            for fname in os.listdir(mdir):
+                if not (fname.startswith("docs") and fname.endswith(".jsonl")):
+                    continue
+                with open(f"{mdir}/{fname}", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        rel = row.get("path")
+                        if not rel or not str(rel).startswith("pages/"):
+                            continue
+                        sha, url = row.get("page_sha"), row.get("url")
+                        if not sha or not url or \
+                                hashlib.sha256(str(url).encode()).hexdigest() != sha:
+                            mismatch += 1
+                            continue
+                        if os.path.exists(f"{STORE_ROOT}/{rel}") or rel in claims:
+                            continue
+                        claims[rel] = (group, row.get("content_sha"))
+    out = {g: {} for g in GROUPS}
+    for rel, (g, csha) in claims.items():
+        out[g][rel] = csha
+    return out, mismatch
+
+
+def _publish_page(state: State, group: str, tmpdir: str, member: str,
+                  rel: str, expect_sha) -> str:
+    """单页发布：解包成员 → 闸门 → 原子发布。返回计数键（ok/bad/empty/
+    dup/fail）。闸门版本化：expect_sha 在（新数据）→ sha256(内容) 强复验；
+    缺省（旧行）→ 宽松门（非空 + 文件名 stem==page_sha 身份自洽）。"""
+    src = f"{tmpdir}/{member}"
+    if not os.path.exists(src):
+        return "fail"
+    sha = os.path.basename(rel).split(".")[0]
+    if os.path.basename(rel) != f"{sha}.md":   # 名字不自洽（畸形 rel）
+        os.unlink(src)
+        return "bad"
+    h = hashlib.sha256()
+    with open(src, "rb") as f:
+        for c in iter(lambda: f.read(1 << 20), b""):
+            h.update(c)
+    got = h.hexdigest()
+    dst = f"{STORE_ROOT}/{rel}"
+    if os.path.exists(dst):                    # 防御：本周期内已被占位
+        os.unlink(src)
+        return "dup"
+    size = os.path.getsize(src)
+    if size == 0:
+        os.unlink(src)
+        return "empty"
+    if expect_sha and got != expect_sha:
+        os.unlink(src)
+        return "bad"
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    os.replace(src, dst)
+    state.append_verified_page(sha, got, group)
+    return "ok"
+
+
+def pull_pages(state: State, group: str, want: dict, max_batches: int) -> dict:
+    """一组 pages 缺集 → 按 reader 分桶批量 tar 流拉取（pull_group 同构）。
+
+    want: {rel: content_sha|None}；返回 {ok, bad, empty, dup, fail}。"""
+    by_reader: dict = {}
+    for rel in want:
+        by_reader.setdefault(reader_for(group, rel), []).append(rel)
+    stat = {"ok": 0, "bad": 0, "empty": 0, "dup": 0, "fail": 0}
+    batches = 0
+    root = GROUPS[group]["pages_root"]
+    for reader, items in by_reader.items():
+        for i in range(0, len(items), BATCH_FILES):
+            if max_batches and batches >= max_batches:
+                return stat
+            batches += 1
+            batch = items[i:i + BATCH_FILES]
+            members = [r[len("pages/"):] for r in batch]   # 剥 pages/ 前缀
+            payload = ("\n".join(members) + "\n").encode()
+            t_batch = time.time()
+            r = ssh_run(reader, f'tar -C {root} --ignore-failed-read '
+                                '-cf - -T -', stdin=payload, timeout=900)
+            print(f"[sync] pages批 {reader} #{batches}（{len(batch)}）："
+                  f"{time.time() - t_batch:.0f}s "
+                  f"ok={stat['ok']} bad={stat['bad']} fail={stat['fail']}",
+                  flush=True)
+            if r.returncode != 0:
+                stat["fail"] += len(batch)
+                print(f"[sync] {reader} pages tar 流失败（{len(batch)} 文件）："
+                      f"{r.stderr.decode()[:150]}", flush=True)
+                continue
+            tmpdir = f"{SYNC_ROOT}/tmp/pages_{group}_{reader.replace('-', '_')}"
+            os.makedirs(tmpdir, exist_ok=True)
+            p = subprocess.run(["tar", "-xf", "-", "-C", tmpdir],
+                               input=r.stdout, capture_output=True)
+            if p.returncode != 0:
+                stat["fail"] += len(batch)
+                continue
+            for rel, member in zip(batch, members):
+                stat[_publish_page(state, group, tmpdir, member, rel,
+                                   want[rel])] += 1
     return stat
 
 
@@ -325,18 +502,44 @@ def cleanup_group(state: State, group: str) -> int:
 # 轮次与入口
 # ---------------------------------------------------------------------------
 
-def cycle(state: State, max_batches: int, no_cleanup: bool) -> dict:
+def cycle(state: State, max_batches: int, no_cleanup: bool,
+          pages_only: bool = False) -> dict:
     t0 = time.time()
     mans = sync_manifests(state)
+    # pages 先于 blobs：知识正文不该排在图片积压后（知识库主线优先）
+    pages_need, page_mm = needed_pages(state)
+    pulled_pages = {g: pull_pages(state, g, rels, max_batches)
+                    for g, rels in pages_need.items() if rels}
+    rec = {"new_manifest_lines": mans,
+           "needed_pages": {g: len(v) for g, v in pages_need.items()},
+           "pulled_pages": pulled_pages,
+           "page_url_mismatch": page_mm}
+    if pages_only:
+        rec["minutes"] = round((time.time() - t0) / 60, 1)
+        state.log(rec)
+        print(f"[sync] 轮完成（pages-only）："
+              f"{json.dumps(rec, ensure_ascii=False)}", flush=True)
+        return rec
     need = needed_blobs(state)
-    pulls = {g: pull_group(state, g, rels, max_batches)
-             for g, rels in need.items() if rels}
+    # 两组并行拉取（吞吐×2；积压 47 万时串行单轮十小时级，小时节拍会被
+    # 单轮吞掉）。State 审计追加有锁；tmpdir 按 组+reader 隔离
+    pulls: dict = {}
+    threads: list = []
+
+    def _pull(g, rels):
+        pulls[g] = pull_group(state, g, rels, max_batches)
+    for g, rels in need.items():
+        if rels:
+            t = threading.Thread(target=_pull, args=(g, rels))
+            t.start()
+            threads.append(t)
+    for t in threads:
+        t.join()
     cleaned = {} if no_cleanup else {g: cleanup_group(state, g)
                                      for g in GROUPS}
-    rec = {"new_manifest_lines": mans,
-           "needed": {g: len(v) for g, v in need.items()},
-           "pulled": pulls, "cleaned": cleaned,
-           "minutes": round((time.time() - t0) / 60, 1)}
+    rec.update({"needed": {g: len(v) for g, v in need.items()},
+                "pulled": pulls, "cleaned": cleaned,
+                "minutes": round((time.time() - t0) / 60, 1)})
     state.log(rec)
     print(f"[sync] 轮完成：{json.dumps(rec, ensure_ascii=False)}", flush=True)
     return rec
@@ -349,11 +552,14 @@ def main() -> None:
     p.add_argument("--max-batches", type=int, default=0,
                    help="每组每轮最多 tar 流批数（0=不限；测试用）")
     p.add_argument("--no-cleanup", action="store_true", help="本轮不清理源端")
+    p.add_argument("--pages-only", action="store_true",
+                   help="只跑清单镜像+pages 回湖（不动 blobs 与清理）")
     args = p.parse_args()
     state = State(SYNC_ROOT)
     while True:
         try:
-            cycle(state, args.max_batches, args.no_cleanup)
+            cycle(state, args.max_batches, args.no_cleanup,
+                  pages_only=args.pages_only)
         except Exception as exc:      # noqa: BLE001 - 单轮失败不倒常驻
             print(f"[sync] 轮异常：{type(exc).__name__}: {exc}", flush=True)
             state.log({"error": f"{type(exc).__name__}: {exc}"})
