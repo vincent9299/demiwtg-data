@@ -44,7 +44,9 @@ def fleet_manifest_sources() -> dict[str, dict]:
         base = "/home/ubuntu/lake/meta"
         for pat in ("image-shard-*.jsonl", "docs-shard-*.jsonl"):
             cmd = (f"cat {base}/{pat}" if not host else
-                   f"ssh -i {CN_KEY} -o ConnectTimeout=15 -o BatchMode=yes "
+                   f"ssh -i {CN_KEY} -o ConnectTimeout=20 -o BatchMode=yes "
+                   f"-o ControlMaster=auto -o ControlPath=/tmp/kilo/cm-%r@%h-%p "
+                   f"-o ControlPersist=300 "
                    f"{host} 'cat {base}/{pat}'")
             try:
                 r = subprocess.run(["bash", "-c", cmd], capture_output=True,
