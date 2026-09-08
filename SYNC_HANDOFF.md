@@ -16,7 +16,7 @@ pages 暂不清理）。采集端凭组共享账本跳过已回湖 sha，不重�
 | 已校验/已删除 | 湖 `sync/verified.jsonl` / `deleted.jsonl` | 追加型，重启现算加载 |
 | pages 审计 | 湖 `sync/verified_pages.jsonl` | {sha, got(实收内容哈希), ts, group}；拉取判定只认湖侧实存，本文件是审计+未来清理 pending |
 | 清单镜像 | 湖 `sync/manifests/<节点>/<文件>` | 增量 tail 的累积副本（节点 meta 的逐字节镜像，未合并） |
-| docs 统一总账 | 湖 `datasets/demiwtg/meta/docs.jsonl` | merge_docs.py 产出的全局去重账（与节点 meta 同 schema、合并后无跨节点重复）；meta/ 下另有既有的 concepts.json/images.jsonl/taxonomy.json |
+| 真 meta 总账 | 湖 `datasets/demiwtg/meta/{docs,images}.jsonl` | **merge_meta.py 例行合并**（lake_sync 每轮末尾自动调用，--no-merge-meta 跳过；也可手动 --once）。docs=全量重合并原子替换（28,128 镜像行→10,023 行）；images=**增量追加**（偏移状态 sync/merge_state.json + 键集 (sha256,instances) 去重，不重写 285 万行大账；首轮 63,883 镜像行→追加 50,882，35 秒）。backfill/dead 镜像不进账（复原操作/死信留档）。fcntl 锁防手动与轮次重叠。meta/ 下另有既有 concepts.json/taxonomy.json |
 | blob 店 | 湖 `datasets/demiwtg/blobs/aa/sha.ext` | 内容寻址；**实存=已同步**（幂等账本） |
 | pages 店 | 湖 `datasets/demiwtg/pages/aa/sha(url).md` | **URL 寻址**（page.py：page_sha=sha256(url)，同 URL 重抓覆盖） |
 | 防重下账本 | 组桶 `/lhcos-data/demiwtg-data/meta/synced_shas.jsonl` | jsonl {"s":sha}；两组各在自家桶（SG 五机一份、CN 五机一份） |

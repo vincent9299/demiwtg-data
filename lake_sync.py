@@ -503,7 +503,7 @@ def cleanup_group(state: State, group: str) -> int:
 # ---------------------------------------------------------------------------
 
 def cycle(state: State, max_batches: int, no_cleanup: bool,
-          pages_only: bool = False) -> dict:
+          pages_only: bool = False, merge_meta_off: bool = False) -> dict:
     t0 = time.time()
     mans = sync_manifests(state)
     # pages 先于 blobs：知识正文不该排在图片积压后（知识库主线优先）
@@ -537,8 +537,19 @@ def cycle(state: State, max_batches: int, no_cleanup: bool,
         t.join()
     cleaned = {} if no_cleanup else {g: cleanup_group(state, g)
                                      for g in GROUPS}
+    # 镜像 → 真 meta（例行合并，收口「镜像清单→总账」这一步；独立 try
+    # ——账面合并不应拖垮同步轮，失败下轮自然重试幂等）
+    meta_merged = None
+    if not merge_meta_off:
+        try:
+            import merge_meta
+            meta_merged = merge_meta.merge_all()
+        except Exception as exc:      # noqa: BLE001 - 合并失败只记账不断轮
+            print(f"[sync] meta 合并异常：{type(exc).__name__}: {exc}",
+                  flush=True)
     rec.update({"needed": {g: len(v) for g, v in need.items()},
                 "pulled": pulls, "cleaned": cleaned,
+                "meta_merged": meta_merged,
                 "minutes": round((time.time() - t0) / 60, 1)})
     state.log(rec)
     print(f"[sync] 轮完成：{json.dumps(rec, ensure_ascii=False)}", flush=True)
@@ -554,12 +565,15 @@ def main() -> None:
     p.add_argument("--no-cleanup", action="store_true", help="本轮不清理源端")
     p.add_argument("--pages-only", action="store_true",
                    help="只跑清单镜像+pages 回湖（不动 blobs 与清理）")
+    p.add_argument("--no-merge-meta", action="store_true",
+                   help="轮末不合并镜像→meta 总账（merge_meta.py）")
     args = p.parse_args()
     state = State(SYNC_ROOT)
     while True:
         try:
             cycle(state, args.max_batches, args.no_cleanup,
-                  pages_only=args.pages_only)
+                  pages_only=args.pages_only,
+                  merge_meta_off=args.no_merge_meta)
         except Exception as exc:      # noqa: BLE001 - 单轮失败不倒常驻
             print(f"[sync] 轮异常：{type(exc).__name__}: {exc}", flush=True)
             state.log({"error": f"{type(exc).__name__}: {exc}"})
