@@ -46,6 +46,9 @@ def parse_args() -> argparse.Namespace:
                    help="跳过前 N 页（流位置口径，非 title 排序）")
     p.add_argument("--shard", default="", metavar="I/N",
                    help="分片运行：按流位置步长切片 + 分片清单名")
+    p.add_argument("--manifest-name", default="",
+                   help="覆盖清单名（缺省 pages-{lang}[-shard]；磁盘受限机的"
+                        "分块顺序执行用：pages-en-partN.jsonl 逐块归档腾空间）")
     p.add_argument("--merge-shards", action="store_true",
                    help="合并 kb/ 下该语种全部分片清单后退出（收尾动作用；"
                         "各机分片清单 scp 汇到一台后执行）")
@@ -94,6 +97,8 @@ def main() -> None:
         except Exception:
             raise SystemExit(f"--shard 需为 I/N 形式（收到 {args.shard!r}）")
         manifest_name = f"pages-{args.lang}-shard-{i}-of-{n}.jsonl"
+    if args.manifest_name:
+        manifest_name = args.manifest_name
 
     sink = PagesSinkStage(args.dataset, args.lang, manifest_name)
     parse_stage = WikiParseStage()
