@@ -16,11 +16,23 @@ D2 分片形态（--shards N）：
 - 跑完用 merge_shards.py 合并分片清单。
 
 职责边界：只做「看门狗」——拉起、盯清单行数、停摆则 kill+重拉；
-不做任何数据处理，flow 的全部参数原样透传。
+不做任何数据处理，被托管模块的全部参数原样透传。
+
+2026-09-09 泛化（kb 线接入）：
+- --module：托管入口模块名（默认 flow）；非 flow 模块须给
+  --manifest-template（占位 {i}/{n}，相对 --dataset，如 kb 线的
+  'kb/pages-zh-shard-{i}-of-{n}.jsonl'）——flow 的 meta/image 清单
+  推导逻辑只对 flow 本体生效；
+- 批处理语义：子进程干净退出（rc=0）视为该分片完成、不再重拉
+  （flow 采集线 rc=0 不会自发出现，语义不变；kb 线是一次性批任务，
+  完成即收工）。非零退出照旧重拉续跑。
 
 用法：
     python3 -m supervise -- --top-n 2                     # 单进程（同旧）
     python3 -m supervise --shards 3 -- --skip-covered 8   # 3 分片并行
+    python3 -m supervise --module flow_kb \\
+        --manifest-template 'kb/pages-zh-shard-{i}-of-{n}.jsonl' \\
+        -- --dump /lhcos-data/zhwiki.xml.bz2 --lang zh    # kb 线 3 分片
 """
 
 from __future__ import annotations
@@ -55,7 +67,12 @@ def main() -> None:
     p.add_argument("--dataset", default=DEFAULT_DATASET,
                    help="分片清单推导根（默认 datasets/demiwtg）")
     p.add_argument("--shards", type=int, default=1,
-                   help="分片并行数：每分片一个 flow 子进程（默认 1=单进程）")
+                   help="分片并行数：每分片一个子进程（默认 1=单进程）")
+    p.add_argument("--module", default="flow",
+                   help="托管入口模块（默认 flow；kb 线用 flow_kb）")
+    p.add_argument("--manifest-template", default="",
+                   help="非 flow 模块的停摆监看清单模板（占位 {i}/{n}，"
+                        "相对 --dataset；flow 本体走 meta/image 推导)")
     p.add_argument("--flow-log", "--chain-log", default=None,
                    help="子进程日志（默认 logs/supervised_flow[_shardN].log）")
     p.add_argument("flow_args", nargs=argparse.REMAINDER,
@@ -88,14 +105,24 @@ def main() -> None:
             dataset, "meta", f"image-shard-{si}-of-{shard_arg.split('/')[1]}.jsonl")
     else:
         manifest = None
+    if args.module != "flow" and not args.manifest_template:
+        p.error(f"--module {args.module} 需要 --manifest-template"
+                "（停摆监看清单推导）")
 
     os.makedirs(os.path.join(REPO_ROOT, "logs"), exist_ok=True)
     children: list[dict] = []
     for i in range(n):
-        cmd = [sys.executable, "-m", "flow", *flow_args]
+        cmd = [sys.executable, "-m", args.module, *flow_args]
         if n > 1:
             cmd += ["--shard", f"{i}/{n}"]
-        if manifest is not None and n == 1:
+        if args.module != "flow":
+            # 非 flow 模块：停摆监看走显式模板（kb 线：kb/pages-*-shard）；
+            # 根目录优先取透传 --dataset（子进程实际用的清单根，避免盯错
+            # 文件把健康分片误杀），缺省回落 supervise 自身 --dataset
+            ds_root = _passthrough("--dataset", args.dataset)
+            manifest = os.path.join(
+                ds_root, args.manifest_template.format(i=i, n=n))
+        elif manifest is not None and n == 1:
             pass               # 单 supervise 挂分片：用透传推导的清单
         else:
             manifest = (DEFAULT_MANIFEST if n == 1 else os.path.join(
@@ -110,8 +137,8 @@ def main() -> None:
                 os.path.dirname(manifest), "docs-" + mb[len("image-"):]))
         log = args.flow_log or os.path.join(
             REPO_ROOT, "logs",
-            "supervised_flow.log" if n == 1
-            else f"supervised_flow_shard{i}.log")
+            f"supervised_{args.module}.log" if n == 1
+            else f"supervised_{args.module}_shard{i}.log")
         children.append({"idx": i, "cmd": cmd, "manifests": manifests,
                          "log": log, "proc": None, "logf": None,
                          "last_lines": {}, "last_growth": time.time(),
@@ -146,6 +173,8 @@ def main() -> None:
         _spawn(c)
 
     while not shutting_down:
+        if all(c["proc"] is None for c in children):
+            break              # 批处理语义：全部干净退出即收工
         time.sleep(args.check_seconds)
         for c in children:
             proc = c["proc"]
@@ -153,7 +182,15 @@ def main() -> None:
                 continue
             rc = proc.poll()
             if rc is not None:
-                print(f"[supervise] 分片{c['idx']} 自行退出 rc={rc}，"
+                if rc == 0:
+                    # 批处理语义：干净退出=完成不重拉（flow 采集线
+                    # rc=0 不自发出现，行为不变；kb 线完成即收工）
+                    c["logf"].close()
+                    c["proc"] = None
+                    print(f"[supervise] 分片{c['idx']} 干净退出，完成",
+                          flush=True)
+                    continue
+                print(f"[supervise] 分片{c['idx']} 异常退出 rc={rc}，"
                       f"5 秒后重拉", flush=True)
                 time.sleep(5)
                 c["restarts"] += 1
