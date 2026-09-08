@@ -12,8 +12,8 @@
 - 只合并不校验页面实存（页面拉取是 lake_sync 的职责，账实对账另做）。
 
 用法（湖 pod 直跑，stdlib only）：
-    python3 merge_docs.py                     # 合并 → datasets/demiwtg/docs.jsonl
-    python3 merge_docs.py --dry-run           # 只统计不落盘
+    python3 merge_docs.py              # 合并 → datasets/demiwtg/meta/docs.jsonl
+    python3 merge_docs.py --dry-run    # 只统计不落盘
 """
 
 from __future__ import annotations
@@ -25,7 +25,10 @@ import os
 
 LAKE_ROOT = "/yzp/zhaozy/yangzepeng/0905/demiwtg"
 MANIFEST_GLOB = f"{LAKE_ROOT}/sync/manifests/*/docs*.jsonl"
-OUTPUT = f"{LAKE_ROOT}/datasets/demiwtg/docs.jsonl"
+# 统一总账落 {dataset_root}/meta/——与节点清单惯例（~/lake/meta）及湖侧
+# 既有 meta/（concepts.json/images.jsonl/taxonomy.json）对齐：内容真源在
+# {dataset_root}/{blobs,pages}/，清单/meta 在 {dataset_root}/meta/
+OUTPUT = f"{LAKE_ROOT}/datasets/demiwtg/meta/docs.jsonl"
 
 
 def merge_docs(dry_run: bool = False) -> dict:
